@@ -1,10 +1,10 @@
 (() => {
   "use strict";
 
-  const ADAPTER_REVISION = "healthcare-directory-v9";
-  const ADAPTER_REQUEST = "MEDHUNT_HEALTHCARE_DIRECTORY_V9_REQUEST";
-  if (window.__medhuntHealthcareDirectoryAdapterRevision === ADAPTER_REVISION) return;
-  window.__medhuntHealthcareDirectoryAdapterRevision = ADAPTER_REVISION;
+  const ADAPTER_REVISION = "healthcare-directory-v10";
+  const ADAPTER_REQUEST = "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST";
+  if (window.__radixsolHealthcareDirectoryAdapterRevision === ADAPTER_REVISION) return;
+  window.__radixsolHealthcareDirectoryAdapterRevision = ADAPTER_REVISION;
 
   const host = location.hostname.toLowerCase();
   const matches = (root) => host === root || host.endsWith(`.${root}`);
@@ -22,7 +22,9 @@
               ? { key: "commonspirit", label: "CommonSpirit Health" }
               : host === "providers.sharecare.com"
                 ? { key: "sharecare", label: "Sharecare" }
-              : null;
+                : host === "doctor.webmd.com"
+                  ? { key: "webmd", label: "WebMD" }
+                  : null;
   if (!PLATFORM) return;
 
   let lastProfiles = [];
@@ -70,7 +72,7 @@
     }
   }
 
-  const PROVIDER_CREDENTIAL = /^(?:M\.?D\.?|D\.?O\.?|M\.?P\.?H\.?|Ph\.?D\.?|DNP|APRN(?:-C)?|NP|FNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|AGNP(?:-(?:C|BC))?|CRNP|CNP|CNM|PA-C|RN|LPN|MSN|BSN|DDS|DMD|FACP|FACOG)\.?$/i;
+  const PROVIDER_CREDENTIAL = /^(?:M\.?D\.?|D\.?O\.?|M\.?P\.?H\.?|Ph\.?D\.?|DNP|APRN(?:-C)?|NP|FNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|AGNP(?:-(?:C|BC))?|CRNP|CNP|CNM|CRNA|PA-C|RN|LPN|MSN|BSN|DDS|DMD|FACP|FACOG)\.?$/i;
 
   function providerCredentials(value) {
     const parts = clean(value, 240)
@@ -83,6 +85,7 @@
   function providerProfession(credentials) {
     const values = unique(credentials).join(" ");
     if (/\b(?:M\.?D\.?|D\.?O\.?)\b/i.test(values)) return "Physician";
+    if (/\bCRNA\b/i.test(values)) return "Nurse Anesthetist";
     if (/\b(?:DNP|APRN(?:-C)?|NP|FNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|AGNP(?:-(?:C|BC))?|CRNP|CNP|CNM)\b/i.test(values)) {
       return "Nurse Practitioner";
     }
@@ -179,15 +182,15 @@
           if (!value || typeof value !== "object") continue;
           values.push(value);
           if (Array.isArray(value["@graph"])) pending.push(...value["@graph"]);
-
-
+          // U.S. News sometimes nests its Physician schema below a
+          // MedicalWebPage instead of publishing it as a top-level object.
           if (value.mainEntity && typeof value.mainEntity === "object") pending.push(value.mainEntity);
-
+          // Sharecare publishes directory entries under SearchResultsPage.provider.
           if (Array.isArray(value.provider)) pending.push(...value.provider);
           else if (value.provider && typeof value.provider === "object") pending.push(value.provider);
         }
       } catch {
-
+        // Ignore unrelated or temporarily incomplete structured-data blocks.
       }
     }
     return values;
@@ -199,19 +202,29 @@
   }
 
   function schemaName(value) {
-    if (typeof value === "string") return clean(value, 180);
-    return clean(value?.name, 180);
+    const raw = typeof value === "string" ? value : value?.name;
+    const text = clean(raw, 180);
+    if (!text) return "";
+    // JSON-LD commonly uses Schema.org URLs for medicalSpecialty values.
+    try {
+      const parsed = new URL(text);
+      if (parsed.hostname.toLowerCase() === "schema.org") {
+        const tail = decodeURIComponent(parsed.pathname.split("/").filter(Boolean).pop() || "");
+        if (tail) return clean(tail.replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " "), 180);
+      }
+    } catch { /* retain non-URL labels */ }
+    return text;
   }
 
   function schemaNames(value) {
     const names = [];
     for (const item of schemaValues(value)) {
       if (typeof item === "string") {
-        names.push(item);
+        names.push(schemaName(item));
       } else if (Array.isArray(item?.name)) {
-        names.push(...item.name);
+        names.push(...item.name.map((entry) => schemaName(entry)));
       } else if (item?.name) {
-        names.push(item.name);
+        names.push(schemaName(item));
       }
     }
     return unique(names);
@@ -434,10 +447,10 @@
   }
 
   function commonSpiritCard(link) {
-
-
-
-
+    // Current CommonSpirit cards are wrapped by a LiveView node such as
+    // #profile-card-<uuid>; older snapshots used #card-<uuid>.  Returning
+    // the outer wrapper is important because the provider link itself only
+    // contains the name, not the location or analytics payload.
     return link?.closest?.("[id^='profile-card-'], [id^='card-'], .csh-aem-result-card--profilewrap")
       || link?.closest?.(".csh-aem-result-card--provider")
       || link?.parentElement;
@@ -876,16 +889,38 @@
       absoluteUrl(physician.url || ""), physician,
     ]));
     const cards = all("article.ProviderCardAlternative");
-    const entries = cards.length ? cards.map((card) => ({
-      card,
-      link: card.querySelector('a[href*="/doctor/"]'),
-    })) : physicians.map((physician) => ({
-      card: null,
-      link: all('a[href*="/doctor/"]').find((link) => (
-        absoluteUrl(link.getAttribute("href")) === absoluteUrl(physician.url || "")
-      )),
-      physician,
-    }));
+    const linksByUrl = new Map();
+    for (const link of all('a[href*="/doctor/"]')) {
+      const url = absoluteUrl(link.getAttribute("href"));
+      const current = linksByUrl.get(url);
+      if (!current || looksLikePersonName(link.textContent)) linksByUrl.set(url, link);
+    }
+    const entries = cards.map((card) => {
+      const link = card.querySelector('a[href*="/doctor/"]');
+      const url = absoluteUrl(link?.getAttribute("href") || card.getAttribute("data-href") || "");
+      return { card, link, physician: byUrl.get(url) || null };
+    });
+    const includedUrls = new Set(entries.map((entry) => absoluteUrl(
+      entry.link?.getAttribute("href") || entry.card?.getAttribute("data-href") || "",
+    )));
+    // CRNA result cards can use a different component than Sharecare's
+    // PhysicianCardAlternative. Include every actual doctor-profile link in
+    // the document, even if its surrounding card uses another class.
+    for (const [url, link] of linksByUrl) {
+      if (!url || includedUrls.has(url)) continue;
+      const card = link.closest("article, li, [class*='ProviderCard'], [class*='provider-card'], [class*='result']");
+      entries.push({ card, link, physician: byUrl.get(url) || null });
+      includedUrls.add(url);
+    }
+    // SearchResultsPage JSON-LD can contain more results than the cards that
+    // the current viewport has hydrated. Merge those providers instead of
+    // treating the presence of a few cards as a complete result list.
+    for (const physician of physicians) {
+      const url = absoluteUrl(physician.url || "");
+      if (!url || includedUrls.has(url)) continue;
+      entries.push({ card: null, link: linksByUrl.get(url) || null, physician });
+      includedUrls.add(url);
+    }
     for (const entry of entries) {
       const card = entry.card;
       const link = entry.link;
@@ -920,7 +955,7 @@
             .filter(Boolean).join(", ")
         : locationFromAddress(address);
       const specialties = unique([
-        visibleText(card?.querySelector?.(".ProviderCardAlternative-meta")),
+        visibleText(card?.querySelector?.(".ProviderCardAlternative-meta, [class*='specialty'], [class*='Specialty']")),
         ...schemaNames(physician?.medicalSpecialty),
         visibleText(document.querySelector('[data-qa-target="qa-southpaw-search"]')),
       ]);
@@ -1064,8 +1099,8 @@
       || visibleText(document.querySelector("#experience")),
     );
 
-
-
+    // Wait for the experience block to hydrate before creating a document.
+    // This avoids saving a second, incomplete PDF while the React page loads.
     if (!education.length && !licenses.length && !certifications.length) return null;
     return {
       kind: "public_professional_profile",
@@ -1181,9 +1216,24 @@
       const href = absoluteUrl(link.getAttribute("href"));
       const npi = href.match(/\/npi\/(\d{10})(?:-|\/|$)/i)?.[1] || npiFrom(link.textContent);
       if (!npi || seen.has(npi)) continue;
-      const card = smallestContainer(link, /\bNPI Number\s*:/i);
+      let card = null;
+      for (let node = link; node; node = node.parentElement) {
+        if (visibleText(node).length > 3000) break;
+        const text = visibleText(node);
+        const hasThisNpi = text.includes(npi) || /\bNPI Number\s*:/i.test(text);
+        const hasPersonName = all("h1, h2, h3, h4, [itemprop='name'], .provider-name", node)
+          .some((element) => looksLikePersonName(element.textContent));
+        if (hasThisNpi && hasPersonName) {
+          card = node;
+          if (node.matches?.("article, li, tr, [class*='card'], [class*='result']")) break;
+        }
+        // Unlike the former smallestContainer helper, keep walking above li
+        // and table-row boundaries: nurse cards commonly wrap those nodes.
+        if (node === document.body) break;
+      }
+      if (!card) card = smallestContainer(link, /\bNPI Number\s*:/i);
       const nameLink = card.querySelector?.('h2 a[href*="/npi/"], h3 a[href*="/npi/"]') || link;
-      const name = cleanProviderName(nameLink.textContent);
+      const name = candidateName(card, nameLink, npi) || cleanProviderName(nameLink.textContent);
       if (!looksLikePersonName(name)) continue;
       const text = visibleText(card);
       const address = clean(text.match(/\bAddress\s*:\s*(.*?)(?=\s+(?:Phone|Fax)\s*:|$)/i)?.[1] || "", 500);
@@ -1205,6 +1255,152 @@
         captured_at: new Date().toISOString(),
       });
       elements.set(npi, card);
+      if (profiles.length >= 100) break;
+    }
+    return { profiles, elements };
+  }
+
+  function webmdSectionValues(labels) {
+    const expected = labels.map((label) => label.toLowerCase());
+    const values = [];
+    for (const title of all("h1, h2, h3, h4, dt, [class*='heading'], [class*='title']")) {
+      const text = visibleText(title).toLowerCase();
+      if (!expected.some((label) => text === label || text.includes(label))) continue;
+      const section = title.closest("section, article, [class*='section'], [class*='card']") || title.parentElement;
+      if (!section) continue;
+      values.push(...all("li, dd, p, a", section).filter((item) => item !== title).map(visibleText));
+    }
+    return unique(values.filter((value) => value.length < 300));
+  }
+
+  function webmdProfileDocument(physician, profile) {
+    const sourceUrl = absoluteUrl(profile?.source_url || physician?.url || canonicalPageUrl());
+    let source;
+    try { source = new URL(sourceUrl); } catch { return null; }
+    if (source.hostname.toLowerCase() !== "doctor.webmd.com"
+      || !/^\/doctor\/[^/?#]+-overview\/?$/i.test(source.pathname)) return null;
+    const exactPage = /^\/doctor\/[^/?#]+-overview\/?$/i.test(location.pathname)
+      && sameProfileUrl(sourceUrl, canonicalPageUrl());
+    const rawName = (exactPage && visibleText(document.querySelector("main h1, h1")))
+      || physician?.name || profile?.name || metaContent('meta[property="og:title"]');
+    const name = cleanProviderName(rawName);
+    if (!looksLikePersonName(name)) return null;
+    const credentials = providerCredentials(rawName);
+    const specialties = unique([
+      ...schemaNames(physician?.medicalSpecialty),
+      ...webmdSectionValues(["Specialty", "Specialties", "Areas of Expertise"]),
+      ...(profile?.specialties || []),
+    ]);
+    const hospitals = unique([
+      ...schemaNames(physician?.hospitalAffiliation),
+      ...webmdSectionValues(["Hospital Affiliations", "Affiliations"]),
+    ]);
+    const education = unique([
+      ...schemaNames(physician?.alumni), ...schemaNames(physician?.education),
+      ...webmdSectionValues(["Education & Training", "Education", "Medical School", "Residency", "Fellowship"]),
+    ]);
+    const credentialsAndLicenses = unique([
+      ...schemaNames(physician?.hasCredential),
+      ...webmdSectionValues(["Certifications", "License", "Licenses", "Certifications, License, & Education"]),
+    ]);
+    const licenses = credentialsAndLicenses.filter((value) => /\blicen[cs]e\b/i.test(value));
+    const certifications = credentialsAndLicenses.filter((value) => !licenses.includes(value));
+    const languages = unique([
+      ...schemaNames(physician?.knowsLanguage), ...webmdSectionValues(["Languages Spoken", "Languages"]),
+    ]);
+    const summary = clean(physician?.description
+      || (exactPage && visibleText(document.querySelector('[class*="biography"], [class*="overview"], [class*="about"]')))
+      || (exactPage && metaContent('meta[name="description"]')), 4000);
+    const address = postalAddress(physician?.address)
+      || (exactPage && visibleText(document.querySelector('[itemprop="address"], address, [class*="address"]')))
+      || profile?.address || "";
+    const locationValue = physician?.address && typeof physician.address === "object"
+      ? [clean(physician.address.addressLocality, 120), clean(physician.address.addressRegion, 80)].filter(Boolean).join(", ")
+      : (profile?.location || locationFromAddress(address));
+    if (!specialties.length && !hospitals.length && !education.length && !licenses.length
+      && !certifications.length && !summary) return null;
+    const specialty = specialties[0] || profile?.headline || providerProfession(credentials);
+    return {
+      kind: "public_professional_profile",
+      source_label: "WebMD",
+      source_url: sourceUrl,
+      headline: specialty,
+      summary,
+      credentials,
+      specialties,
+      subspecialties: [],
+      hospitals,
+      education,
+      licenses,
+      certifications,
+      languages,
+      npi: npiFrom(document.querySelector("[data-npi]")?.getAttribute("data-npi") || profile?.source_id || ""),
+      address,
+      location: locationValue,
+    };
+  }
+
+  function webmdProfiles() {
+    const profiles = [];
+    const elements = new Map();
+    const seen = new Set();
+    const profilePath = /^\/doctor\/[^/?#]+-overview\/?$/i.test(location.pathname);
+    const roots = profilePath ? [document] : all("li.ep[data-npi], li.ep, article[class*='result'], .results-card-wrap");
+    for (const root of roots) {
+      const link = root.querySelector?.("a.prov-name[href*='/doctor/'], a[href*='/doctor/'][href*='overview']")
+        || (profilePath ? null : null);
+      const href = link?.getAttribute("href") || (profilePath ? location.href : "");
+      const sourceUrl = absoluteUrl(href);
+      let parsed;
+      try { parsed = new URL(sourceUrl); } catch { continue; }
+      if (parsed.hostname.toLowerCase() !== "doctor.webmd.com"
+        || !/^\/doctor\/[^/?#]+-overview\/?$/i.test(parsed.pathname)) continue;
+      const physician = jsonLdObjects(root).find((value) => hasSchemaType(value, "Physician"))
+        || jsonLdObjects().find((value) => hasSchemaType(value, "Physician") && sameProfileUrl(value.url || "", sourceUrl))
+        || null;
+      const rawName = (profilePath && visibleText(document.querySelector("main h1, h1")))
+        || visibleText(link) || physician?.name || "";
+      const name = cleanProviderName(rawName);
+      if (!looksLikePersonName(name)) continue;
+      const npi = npiFrom(root.getAttribute?.("data-npi") || physician?.identifier?.value || physician?.identifier || "");
+      const sourceId = npi || parsed.pathname.replace(/^\/doctor\//i, "").replace(/-overview\/?$/i, "");
+      if (!sourceId || seen.has(sourceId)) continue;
+      const cardText = visibleText(root);
+      const specialty = clean(root.querySelector?.(".prov-specialty, [class*='specialty']")?.textContent
+        || schemaNames(physician?.medicalSpecialty)[0] || specialtyFromPage(), 180);
+      const imageAlt = clean(root.querySelector?.("img[alt]")?.getAttribute("alt") || "", 300);
+      const location = clean(
+        cardText.match(/\b([A-Za-z .'-]+,\s*[A-Z]{2})(?=\s*[-|])/i)?.[1]
+          || imageAlt.match(/\b([A-Za-z .'-]+,\s*[A-Z]{2})\b/)?.[1]
+          || "",
+        180,
+      );
+      const credentials = providerCredentials(rawName);
+      const documentProfile = profilePath ? webmdProfileDocument(physician, {
+        name, source_url: sourceUrl, source_id: sourceId, specialty, headline: specialty,
+      }) : null;
+      const profile = {
+        name,
+        location: documentProfile?.location || location,
+        headline: specialty || providerProfession(credentials),
+        notes: profileNotes({
+          npi, specialty, address: documentProfile?.address || "",
+          extra: documentProfile?.summary || cardText.slice(0, 800),
+        }),
+        roles: [providerProfession(credentials)],
+        employers: documentProfile?.hospitals || schemaNames(physician?.hospitalAffiliation),
+        schools: documentProfile?.education || schemaNames(physician?.alumni),
+        licenses: documentProfile?.licenses || [],
+        certifications: documentProfile?.certifications || schemaNames(physician?.hasCredential),
+        profile_document: documentProfile || undefined,
+        source: PLATFORM.key,
+        source_url: sourceUrl,
+        source_id: sourceId,
+        captured_at: new Date().toISOString(),
+      };
+      seen.add(sourceId);
+      profiles.push(profile);
+      elements.set(sourceId, root === document ? document.documentElement : root);
       if (profiles.length >= 100) break;
     }
     return { profiles, elements };
@@ -1309,7 +1505,9 @@
               ? commonSpiritProfiles()
               : PLATFORM.key === "sharecare"
                 ? sharecareProfiles()
-                : usNewsProfiles();
+                : PLATFORM.key === "webmd"
+                  ? webmdProfiles()
+                  : usNewsProfiles();
     lastProfiles = result.profiles;
     lastElements = result.elements;
     return {
@@ -1329,7 +1527,7 @@
     try {
       const result = scanSnapshot();
       chrome.runtime.sendMessage({
-        type: "MEDHUNT_PLATFORM_SCAN_PROGRESS",
+        type: "RADIXSOL_PLATFORM_SCAN_PROGRESS",
         platform: PLATFORM.key,
         found: result.count,
         total: result.expected_count,
@@ -1346,7 +1544,7 @@
     if (!profile) return { ok: false, error: "That displayed provider is no longer available." };
     const element = lastElements.get(profile.source_id);
     const link = element?.matches?.("a[href]") ? element : element?.querySelector?.(
-      'a[href*="/npi/"], a[href*="/doctors/"], a[href*="/nurse-practitioners/"], a[href*="/find-a-doctor/"], a.information'
+      'a[href*="/npi/"], a[href*="/doctors/"], a[href*="/nurse-practitioners/"], a[href*="/find-a-doctor/"], a.prov-name, a[href*="-overview"], a.information'
     );
     if (link) {
       link.scrollIntoView({ block: "center", behavior: "auto" });
@@ -1370,23 +1568,23 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const messageType = message?.type === ADAPTER_REQUEST ? message.original_type : message?.type;
     const respond = (payload) => sendResponse({ ...payload, adapter_revision: ADAPTER_REVISION });
-    if (messageType === "MEDHUNT_PLATFORM_PING") {
+    if (messageType === "RADIXSOL_PLATFORM_PING") {
       respond({ ok: true, platform: PLATFORM.key, label: PLATFORM.label, url: location.href });
       return false;
     }
-    if (messageType === "MEDHUNT_CAPTURE_PLATFORM_PROFILE") {
+    if (messageType === "RADIXSOL_CAPTURE_PLATFORM_PROFILE") {
       respond(captureProfile());
       return false;
     }
-    if (messageType === "MEDHUNT_LIST_PLATFORM_CANDIDATES") {
+    if (messageType === "RADIXSOL_LIST_PLATFORM_CANDIDATES") {
       respond(scanSnapshot());
       return false;
     }
-    if (messageType === "MEDHUNT_SCAN_PLATFORM_CANDIDATES") {
+    if (messageType === "RADIXSOL_SCAN_PLATFORM_CANDIDATES") {
       progressiveScan().then(respond).catch((error) => respond({ ok: false, error: String(error?.message || error) }));
       return true;
     }
-    if (messageType === "MEDHUNT_OPEN_PLATFORM_CANDIDATE") {
+    if (messageType === "RADIXSOL_OPEN_PLATFORM_CANDIDATE") {
       respond(openCandidate(message.index));
       return false;
     }
@@ -1408,7 +1606,7 @@
       lastSignature = signature;
       if (!signature && !hadResults) return;
       chrome.runtime.sendMessage({
-        type: "MEDHUNT_PLATFORM_RESULTS_CHANGED",
+        type: "RADIXSOL_PLATFORM_RESULTS_CHANGED",
         platform: PLATFORM.key,
         count: snapshot.count,
         page_url: location.href,

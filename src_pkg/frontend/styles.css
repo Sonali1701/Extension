@@ -477,6 +477,21 @@ details summary { cursor: pointer; color: var(--navy); font-weight: 650; font-si
 .sheet { background: #fff; border-radius: 14px; max-width: 560px; width: 100%; max-height: calc(100vh - 32px); overflow: auto; padding: 20px; box-shadow: 0 18px 48px rgba(14, 25, 55, .22); }
 .sheet h3 { margin-top: 0; }
 .modal-actions { justify-content: flex-end; }
+.device-dialog { max-width: 680px; }
+.device-list { display: grid; gap: 10px; margin: 16px 0 20px; }
+.device-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #f8fafc;
+}
+.device-row-main { display: grid; flex: 1; gap: 4px; min-width: 0; }
+.device-row-main strong { color: var(--navy); }
+.device-actions { flex: 0 0 auto; }
 .batch-draft-sheet { max-width: 720px; }
 .batch-draft-list { display: grid; gap: 10px; margin-top: 12px; }
 .batch-draft {
@@ -1040,6 +1055,8 @@ body.extension-shell .wrap { height: 100vh; max-width: none; overflow: hidden; p
   .field-auto { width: 100%; max-width: none; }
   .row > .btn { flex: 1 1 auto; }
   .dialog { padding: 22px 18px 18px; }
+  .device-row { align-items: stretch; flex-direction: column; }
+  .device-actions { justify-content: flex-end; }
   .privacy-dialog .modal-actions { grid-template-columns: 1fr; }
   .privacy-dialog .modal-actions .btn.teal { grid-column: auto; }
   .sheet { padding: 15px; }

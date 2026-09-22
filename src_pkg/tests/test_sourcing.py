@@ -67,15 +67,134 @@ def test_public_api_requires_healthboard_session_without_origin_header(monkeypat
             assert (await client.get("/auth/me")).status_code == 401
 
             monkeypatch.setattr(healthboard_auth, "verify_extension_token", lambda token: {
-                "user_id": "42",
+                "user_id": "device-binding-recruiter-42",
                 "email": "recruiter@example.test",
                 "role": "recruiter",
             })
+            device_id = "A" * 43
+            store.register_extension_device(
+                "device-binding-recruiter-42", device_id, device_name="Primary laptop",
+            )
             response = await client.get(
-                "/auth/me", headers={"X-HealthBoard-Extension-Token": "opaque-token"},
+                "/auth/me", headers={
+                    "X-HealthBoard-Extension-Token": "opaque-token",
+                    "X-Medhunt-Device-ID": device_id,
+                },
             )
             assert response.status_code == 200
-            assert response.json()["user"]["user_id"] == "42"
+            assert response.json()["user"]["user_id"] == "device-binding-recruiter-42"
+
+            blocked = await client.get(
+                "/auth/me", headers={
+                    "X-HealthBoard-Extension-Token": "opaque-token",
+                    "X-Medhunt-Device-ID": "B" * 43,
+                },
+            )
+            assert blocked.status_code == 403
+            assert "not registered" in blocked.json()["detail"]
+
+            monkeypatch.setattr(healthboard_auth, "verify_code", lambda *args, **kwargs: {
+                "extension_token": "new-opaque-token",
+                "user": {"user_id": "device-binding-login-43", "email": "r2@example.test"},
+            })
+            login_body = {
+                "email": "r2@example.test", "code": "123456",
+                "challenge": "C" * 40, "device_id": "C" * 43,
+            }
+            login = await client.post("/auth/verify-code", json=login_body)
+            assert login.status_code == 200
+            assert login.json()["device_approval_required"] is False
+            login_body["device_id"] = "D" * 43
+            second_login = await client.post("/auth/verify-code", json=login_body)
+            assert second_login.status_code == 200
+            assert second_login.json()["device_approval_required"] is True
+            assert second_login.json()["device"]["status"] == "pending"
+
+    asyncio.run(exercise())
+
+
+def test_enterprise_device_registration_approval_limit_and_recovery(monkeypatch):
+    store.reset()
+    monkeypatch.setattr(config, "MEDHUNT_MAX_REGISTERED_DEVICES", 2)
+    user_id = "device-workflow-user"
+    first = store.register_extension_device(user_id, "A" * 43, device_name="Laptop")
+    second = store.register_extension_device(user_id, "B" * 43, device_name="Desktop")
+    assert first["status"] == "approved"
+    assert second["status"] == "pending"
+
+    try:
+        store.approve_extension_device(second["id"], actor_user_id=user_id)
+        assert False, "a regular user must not approve devices"
+    except PermissionError:
+        pass
+    approved_second = store.approve_extension_device(
+        second["id"], actor_user_id="healthboard-admin", actor_is_admin=True,
+    )
+    assert approved_second["status"] == "approved"
+    assert store.authorize_extension_device(user_id, "B" * 43)["status"] == "approved"
+
+    third = store.register_extension_device(user_id, "C" * 43, device_name="Replacement")
+    assert third["status"] == "pending"
+    try:
+        store.approve_extension_device(
+            third["id"], actor_user_id="healthboard-admin", actor_is_admin=True,
+        )
+        assert False, "a third approved device must be rejected at the device limit"
+    except ValueError as exc:
+        assert "2 approved devices" in str(exc)
+
+    revoked = store.revoke_extension_device(first["id"], actor_user_id=user_id)
+    assert revoked["status"] == "revoked"
+    assert store.authorize_extension_device(user_id, "A" * 43)["status"] == "revoked"
+    assert store.approve_extension_device(
+        third["id"], actor_user_id="healthboard-admin", actor_is_admin=True,
+    )["status"] == "approved"
+
+
+def test_only_admin_can_approve_pending_installation_via_api(monkeypatch):
+    store.reset()
+    monkeypatch.setattr(config, "HEALTHBOARD_BASE_URL", "https://board.example.test")
+    monkeypatch.setattr(config, "MEDHUNT_MAX_REGISTERED_DEVICES", 2)
+    user_id = "device-api-user"
+    first_id, second_id = "E" * 43, "F" * 43
+    store.register_extension_device(user_id, first_id, device_name="Main laptop")
+    pending = store.register_extension_device(user_id, second_id, device_name="Home desktop")
+    identity_role = {"value": "recruiter"}
+    monkeypatch.setattr(healthboard_auth, "verify_extension_token", lambda token: {
+        "user_id": user_id, "email": "device.user@example.test",
+        "role": identity_role["value"],
+    })
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            first_headers = {
+                "X-HealthBoard-Extension-Token": "first-token",
+                "X-Medhunt-Device-ID": first_id,
+            }
+            listed = await client.get("/auth/devices", headers=first_headers)
+            assert listed.status_code == 200
+            assert listed.json()["max_approved_devices"] == 2
+            assert len(listed.json()["items"]) == 2
+
+            forbidden = await client.post(
+                f"/auth/devices/{pending['id']}/approve", headers=first_headers,
+            )
+            assert forbidden.status_code == 403
+
+            identity_role["value"] = "admin"
+            approved = await client.post(
+                f"/auth/devices/{pending['id']}/approve", headers=first_headers,
+            )
+            assert approved.status_code == 200
+            assert approved.json()["device"]["status"] == "approved"
+
+            status = await client.get("/auth/device-status", headers={
+                "X-HealthBoard-Extension-Token": "second-token",
+                "X-Medhunt-Device-ID": second_id,
+            })
+            assert status.status_code == 200
+            assert status.json()["approved"] is True
 
     asyncio.run(exercise())
 
@@ -3260,7 +3379,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             }
             assert health_body["status"] == "ok"
             assert health_body["service"] == "medhunt-api"
-            assert health_body["version"] == "3.26.4"
+            assert health_body["version"] == "3.26.6"
             assert set(health_body["records_lookup"]) == {
                 "enabled", "typical_seconds",
             }
@@ -3728,7 +3847,7 @@ def test_frontend_is_manifest_v3_compatible():
     run_script = (project_root / "run-benchmark-backend.ps1").read_text(encoding="utf-8")
 
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "3.26.4"
+    assert manifest["version"] == "3.26.6"
     assert "medhunt" in manifest["name"].casefold()
     assert "radixsol" not in manifest["name"].casefold()
     assert "medhunt" in manifest["action"]["default_title"].casefold()

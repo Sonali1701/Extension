@@ -29,6 +29,7 @@ from urllib.parse import quote
 import httpx
 
 from .person_name import identity_signature, is_name_suffix, normalize_person_name
+from . import legacy_taxonomy
 
 
 _SURNAME_PARTICLES = {"da", "de", "del", "della", "der", "di", "du", "la", "le", "van", "von"}
@@ -42,11 +43,34 @@ _SPECIALTY_ALIASES: Mapping[str, tuple[str, ...]] = {
     "family medicine": ("Family Practice", "Family Practice/Primary Care"),
     "family practice": ("Family Medicine", "Family Practice/Primary Care"),
     "primary care": ("Family Practice/Primary Care", "Family Practice"),
-    "thoracic surgery": ("Surgery-Thoracic", "CardioThoracic Surgery"),
-    "cardiothoracic surgery": ("CardioThoracic Surgery", "Surgery-Thoracic"),
+    "anesthesia": ("Anesthesiology",),
+    "anesthesiology": ("Anesthesia",),
+    "cardiothoracic surgery": ("CardioThoracic Surgery", "Thoracic Surgery", "Surgery-Thoracic"),
+    "thoracic surgery": ("CardioThoracic Surgery", "Cardiothoracic Surgery", "Surgery-Thoracic"),
+    "gastroenterologic": ("Gastroenterology",),
+    "gastroenterology": ("Gastroenterologic",),
+    "obstetrics gynecology": ("Gynecology", "Obstetrics", "Obstetrics & Gynecology"),
+    "obstetrics and gynecology": ("Gynecology", "Obstetrics", "Obstetrics & Gynecology"),
+    "gynecology": ("Obstetrics", "Obstetrics & Gynecology"),
+    "internal medicine": ("Internal Medicine",),
+    "emergency medicine": ("Emergency Medicine",),
     "ob gyn": ("Obstetrics & Gynecology",),
     "obgyn": ("Obstetrics & Gynecology",),
-    "obstetrics and gynecology": ("Obstetrics & Gynecology",),
+}
+
+# A source directory often uses a credential/role label that is semantically
+# correct but not identical to the tenant's profession master label. Try the
+# canonical label first, then these reviewed equivalents before falling back to
+# Nexus's explicit Unknown pair.
+_PROFESSION_ALIASES: Mapping[str, tuple[str, ...]] = {
+    "physician": ("Physician", "Doctor", "Medical Doctor", "MD", "DO"),
+    "nurse": ("RN", "Registered Nurse", "Nurse"),
+    "registered nurse": ("RN", "Nurse"),
+    "nurse anesthetist": ("CRNA", "Certified Registered Nurse Anesthetist"),
+    "crna": ("Nurse Anesthetist", "Certified Registered Nurse Anesthetist"),
+    "nurse practitioner": ("Nurse Practitioner", "NP", "APRN"),
+    "medical doctor": ("Physician", "Doctor", "MD", "DO"),
+    "doctor": ("Physician", "Medical Doctor", "MD", "DO"),
 }
 
 
@@ -713,13 +737,66 @@ def _candidate_specialties(candidate: Mapping[str, Any], accepted: Mapping[str, 
     return _text_values(values)
 
 
+def _candidate_role(candidate: Mapping[str, Any], accepted: Mapping[str, Any]) -> str:
+    """Return the source-declared profession/role for Nexus mapping.
+
+    Candidate rows intentionally keep the browser payload in ``notes`` rather
+    than adding an unrestricted job-title column.  The import path writes
+    explicit ``Profession:``/``Role:`` evidence lines there, so read those
+    lines back before falling through to resume-extraction fields.  Without
+    this step a valid Sharecare/Directory role was silently treated as empty
+    and Nexus had to use its Unknown profession classification.
+    """
+    direct_values = (
+        candidate.get("job_title"),
+        candidate.get("role"),
+        candidate.get("title"),
+        accepted.get("job_title"),
+        accepted.get("profession"),
+        accepted.get("role"),
+        accepted.get("occupation"),
+        accepted.get("title"),
+    )
+    for value in direct_values:
+        text = " ".join(str(value or "").split()).strip()
+        if text:
+            return text
+
+    # ``_profile_row`` preserves these labels as source evidence. Prefer an
+    # explicit profession over a generic role/headline when both are present.
+    found: dict[str, str] = {}
+    for raw_line in str(candidate.get("notes") or "").splitlines():
+        match = re.match(r"^\s*(profession|role|headline|occupation)\s*:\s*(.+?)\s*$", raw_line, re.I)
+        if not match:
+            continue
+        value = " ".join(match.group(2).split()).strip()
+        if value:
+            found.setdefault(match.group(1).casefold(), value)
+    for label in ("profession", "role", "occupation", "headline"):
+        if found.get(label):
+            return found[label]
+    return ""
+
+
 def _specialty_master_labels(values: Sequence[str]) -> list[str]:
     """Return source labels followed by approved Nexus label equivalents."""
     expanded: list[str] = []
     for value in _text_values(values):
+        canonical = legacy_taxonomy.canonical_specialty(value)
+        if canonical:
+            expanded.append(canonical)
         expanded.append(value)
-        alias_key = re.sub(r"[^a-z0-9]+", " ", value.casefold()).strip()
-        expanded.extend(_SPECIALTY_ALIASES.get(alias_key, ()))
+        # Sharecare and other JSON-LD publishers sometimes expose a Schema.org
+        # URI (for example ``https://schema.org/Anesthesia``) instead of the
+        # human label. Resolve the URI tail before applying reviewed aliases.
+        uri_tail = re.split(r"[/#]", value)[-1]
+        uri_tail = re.sub(r"([a-z])([A-Z])", r"\1 \2", uri_tail)
+        uri_tail = uri_tail.replace("_", " ").strip()
+        if uri_tail and uri_tail.casefold() != value.casefold():
+            expanded.append(uri_tail)
+        for label in (value, uri_tail):
+            alias_key = re.sub(r"[^a-z0-9]+", " ", label.casefold()).strip()
+            expanded.extend(_SPECIALTY_ALIASES.get(alias_key, ()))
     return _text_values(expanded)
 
 
@@ -816,13 +893,7 @@ def _trusted_identity(payload: Mapping[str, Any]) -> dict[str, Any]:
         "city": city,
         "state": state,
         "country": country,
-        "role": str(
-            candidate.get("job_title")
-            or candidate.get("role")
-            or candidate.get("title")
-            or accepted.get("job_title")
-            or ""
-        ).strip(),
+        "role": _candidate_role(candidate, accepted),
         "specialties": _candidate_specialties(candidate, accepted),
     }
 
@@ -849,6 +920,19 @@ def _master_id(row: Mapping[str, Any], list_name: str = "") -> Any:
 
 def _label(value: Any) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value or "").casefold()).strip()
+
+
+def _master_labels(row: Mapping[str, Any]) -> set[str]:
+    """Read the label variants returned by different Nexus API revisions."""
+    return {
+        value
+        for key in (
+            "name", "label", "code", "abbreviation", "displayName",
+            "description", "professionName", "specialtyName", "value",
+        )
+        for value in (_label(row.get(key)),)
+        if value
+    }
 
 
 _PROFESSION_ROLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -906,10 +990,20 @@ def _profession_labels(role: str) -> tuple[str, ...]:
     unrelated clinical profession merely to pass payload validation.
     """
     text = str(role or "").strip()
+    labels: list[str] = []
+    if text:
+        canonical = legacy_taxonomy.canonical_profession(text)
+        if canonical:
+            labels.append(canonical)
     for label, pattern in _PROFESSION_ROLE_PATTERNS:
         if pattern.search(text):
-            return (label,)
-    return ("Unknown",)
+            if label not in labels:
+                labels.append(label)
+            break
+    expanded: list[str] = []
+    for label in labels:
+        expanded.extend((label, *_PROFESSION_ALIASES.get(_label(label), ())))
+    return tuple(_text_values(expanded)) or ("Unknown",)
 
 
 def _exact_master_id(
@@ -923,12 +1017,7 @@ def _exact_master_id(
     wanted = {_label(value) for value in values if _label(value)}
     matches: dict[int, Mapping[str, Any]] = {}
     for row in _active(client.get_master(name)):
-        labels = {
-            _label(row.get("name")),
-            _label(row.get("label")),
-            _label(row.get("code")),
-            _label(row.get("abbreviation")),
-        }
+        labels = _master_labels(row)
         raw_id = _master_id(row, name)
         if raw_id is None or not (wanted & labels):
             continue
@@ -960,12 +1049,7 @@ def _preferred_master_id(
         wanted = _label(value)
         matches: set[int] = set()
         for row in rows:
-            labels = {
-                _label(row.get("name")),
-                _label(row.get("label")),
-                _label(row.get("code")),
-                _label(row.get("abbreviation")),
-            }
+            labels = _master_labels(row)
             raw_id = _master_id(row, name)
             if not wanted or wanted not in labels or raw_id is None:
                 continue
@@ -999,12 +1083,7 @@ def _preferred_master_row(
         wanted = _label(value)
         matches: dict[int, Mapping[str, Any]] = {}
         for row in rows:
-            labels = {
-                _label(row.get("name")),
-                _label(row.get("label")),
-                _label(row.get("code")),
-                _label(row.get("abbreviation")),
-            }
+            labels = _master_labels(row)
             raw_id = _master_id(row, name)
             if not wanted or wanted not in labels or raw_id is None:
                 continue
@@ -1098,9 +1177,9 @@ def _build_profile(
             "Candidate first and last name are required for Nexus creation.",
             operation="payload_validation",
         )
-    if not profile["email"] or not profile["phone"]:
+    if not profile["email"] and not profile["phone"]:
         raise NexusPermanentError(
-            "Nexus creation requires both a trusted email and phone.",
+            "Nexus creation requires at least one trusted email or phone.",
             operation="payload_validation",
         )
 

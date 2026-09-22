@@ -5,6 +5,8 @@ import os
 import sys
 from io import BytesIO
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from sourcing import config, nexus_delivery, nexus_sync, store
@@ -299,6 +301,35 @@ def test_approved_quick_sourcer_record_queues_existing_resume(monkeypatch):
             "record": {
                 "phones": [{"value": "(404) 555-0199", "type": "Wireless"}],
             },
+        },
+    )
+
+    queued = nexus_delivery.queue_latest_resume_if_ready(candidate_id)
+
+    assert queued["resume_id"] == latest["id"]
+    assert queued["status"] == "pending"
+
+
+@pytest.mark.parametrize(
+    ("emails", "phones"),
+    [(["jane@example.test"], []), ([], ["(404) 555-0199"])],
+)
+def test_existing_latest_resume_queues_with_either_contact(monkeypatch, emails, phones):
+    store.reset()
+    monkeypatch.setattr(config, "NEXUS_SYNC_ENABLED", True)
+    candidate_id = store.add_candidate("Jane Doe", "Atlanta, GA", source="indeed")
+    latest = store.attach_resume(
+        candidate_id, "latest.pdf", b"%PDF-latest", checksum_sha256="e" * 64,
+    )
+    candidate = store.get_candidate(candidate_id)
+    monkeypatch.setattr(
+        nexus_delivery.contact_access,
+        "project_candidate",
+        lambda _candidate: {
+            **candidate,
+            "contacts_trusted": True,
+            "emails": emails,
+            "phones": phones,
         },
     )
 

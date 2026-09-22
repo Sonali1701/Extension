@@ -110,6 +110,7 @@
       medifind: "medifind.com",
       commonspirit: "commonspirit.org",
       sharecare: "providers.sharecare.com",
+      webmd: "doctor.webmd.com",
     };
     const root = roots[platform];
     return Boolean(root && (host === root || host.endsWith(`.${root}`)));
@@ -137,6 +138,7 @@
       if (platform === "medifind") return /^\/doctors\/[^/?#]+\/\d+\/?$/i.test(url.pathname);
       if (platform === "commonspirit") return /^\/find-a-doctor\/[^/?#]+-\d+\/?$/i.test(url.pathname);
       if (platform === "sharecare") return /^\/doctor\/[^/?#]+\/?$/i.test(url.pathname);
+      if (platform === "webmd") return /^\/doctor\/[^/?#]+-overview\/?$/i.test(url.pathname);
       return true;
     } catch {
       return false;
@@ -160,7 +162,7 @@
 
   function sanitizeProfileDocument(value, platform, sourceUrl) {
     if (
-      !["usnews", "medifind", "commonspirit", "sharecare"].includes(platform) || !value || typeof value !== "object"
+      !["usnews", "medifind", "commonspirit", "sharecare", "webmd"].includes(platform) || !value || typeof value !== "object"
       || value.kind !== "public_professional_profile"
     ) return null;
     const documentUrl = cleanText(value.source_url || sourceUrl, 1200);
@@ -182,7 +184,8 @@
       source_label: cleanText(value.source_label, 100)
         || (platform === "medifind" ? "MediFind"
           : platform === "commonspirit" ? "CommonSpirit Health"
-            : platform === "sharecare" ? "Sharecare" : "U.S. News Doctor Finder"),
+            : platform === "sharecare" ? "Sharecare"
+              : platform === "webmd" ? "WebMD" : "U.S. News Doctor Finder"),
       source_url: documentUrl,
       headline: cleanText(value.headline, 300),
       summary,

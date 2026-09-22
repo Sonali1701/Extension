@@ -103,6 +103,44 @@ def test_lookup_stores_and_returns_every_delivered_contact(quick_sourcer_enabled
     assert stored["verification"]["record"]["current_address"]["county"] == "Northampton County"
 
 
+def test_repeated_lookup_reuses_the_candidate_row_without_provider_call(
+    quick_sourcer_enabled, monkeypatch,
+):
+    calls = _stub_api(monkeypatch, FOUND_PAYLOAD)
+    candidate_id = _candidate()
+
+    first = quick_sourcer_client.lookup_candidate(candidate_id)
+    second = quick_sourcer_client.lookup_candidate(candidate_id)
+
+    assert first["status"] == "found"
+    assert second["status"] == "found"
+    assert second["cached"] is True
+    assert len(calls) == 1
+
+
+def test_lookup_reuses_a_fresh_contact_result_from_another_provider(
+    quick_sourcer_enabled, monkeypatch,
+):
+    calls = _stub_api(monkeypatch, FOUND_PAYLOAD)
+    candidate_id = _candidate()
+    store.update_candidate(
+        candidate_id,
+        emails=["cached@example.test"],
+        phones=["(610) 555-0142"],
+        enrich_status="success",
+        contact_expires_at=9999999999,
+        verification={"source": "people_data_labs", "record": {}},
+    )
+
+    result = quick_sourcer_client.lookup_candidate(candidate_id)
+
+    assert result["status"] == "found"
+    assert result["cached"] is True
+    assert result["emails"] == ["cached@example.test"]
+    assert result["phones"] == ["(610) 555-0142"]
+    assert calls == []
+
+
 def test_stored_record_is_projected_to_the_panel_without_a_trust_gate(
     quick_sourcer_enabled, monkeypatch,
 ):

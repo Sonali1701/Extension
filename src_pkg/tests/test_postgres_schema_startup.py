@@ -44,6 +44,9 @@ def test_prepare_postgres_skips_schema_replay_when_database_is_current(monkeypat
     assert len(connection.queries) == 1
     query = connection.queries[0][0]
     assert "to_regclass('medhunt.candidates')" in query
+    assert "to_regclass('medhunt.extension_devices')" in query
+    assert "to_regclass('medhunt.extension_device_registrations')" in query
+    assert "to_regclass('medhunt.idx_extension_devices_user_status')" in query
     assert "table_schema = 'medhunt'" in query
     assert "table_name = 'enrichment_events'" in query
     assert "column_name = 'candidate_id'" in query

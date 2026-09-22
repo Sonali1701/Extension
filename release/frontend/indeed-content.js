@@ -2,10 +2,10 @@
   "use strict";
 
   const ADAPTER_REVISION = "indeed-capture-v5";
-  const ADAPTER_REQUEST = "MEDHUNT_INDEED_V5_REQUEST";
-  if (window.__medhuntIndeedAdapterRevision === ADAPTER_REVISION) return;
-  window.__medhuntIndeedAdapterRevision = ADAPTER_REVISION;
-  window.__medhuntIndeedCaptureLoaded = true;
+  const ADAPTER_REQUEST = "RADIXSOL_INDEED_V5_REQUEST";
+  if (window.__radixsolIndeedAdapterRevision === ADAPTER_REVISION) return;
+  window.__radixsolIndeedAdapterRevision = ADAPTER_REVISION;
+  window.__radixsolIndeedCaptureLoaded = true;
 
   const NAME_SELECTORS = [
     "[data-cauto-id='candidate-name']",
@@ -45,7 +45,7 @@
         /^(?:closed|inactive|exited|stale)$/i.test(node.getAttribute?.("data-state") || "") ||
         /^(?:stale|removed)$/i.test(node.getAttribute?.("data-status") || "") ||
         node.getAttribute?.("data-stale") === "true" ||
-        node.getAttribute?.("data-medhunt-stale") === "true"
+        node.getAttribute?.("data-radixsol-stale") === "true"
       ) return false;
       const style = getComputedStyle(node);
       if (
@@ -217,7 +217,7 @@
   let capturedTentativeResume = null;
   let resumeCaptureEvents = [];
   window.addEventListener("message", (event) => {
-    if (event.source !== window || !event.data?.__medhuntResume) return;
+    if (event.source !== window || !event.data?.__radixsolResume) return;
     const incoming = {
       base64: String(event.data.base64 || ""),
       contentType: String(event.data.contentType || ""),
@@ -264,18 +264,18 @@
     capturedResume = null;
     capturedTentativeResume = null;
     resumeCaptureEvents = [];
-    await chrome.storage.local.set({ medhuntResumeCapturing: true });
-    await chrome.storage.local.remove(["medhuntLastResumeDownload"]);
+    await chrome.storage.local.set({ radixsolResumeCapturing: true });
+    await chrome.storage.local.remove(["radixsolLastResumeDownload"]);
   }
 
   async function endResumeCapture() {
-    await chrome.storage.local.set({ medhuntResumeCapturing: false });
+    await chrome.storage.local.set({ radixsolResumeCapturing: false });
   }
 
   async function lastCapturedDownload() {
     try {
-      const stored = await chrome.storage.local.get(["medhuntLastResumeDownload"]);
-      return stored.medhuntLastResumeDownload || null;
+      const stored = await chrome.storage.local.get(["radixsolLastResumeDownload"]);
+      return stored.radixsolLastResumeDownload || null;
     } catch {
       return null;
     }
@@ -686,7 +686,7 @@
 
   function reportScanProgress(found, total, profiles) {
     chrome.runtime.sendMessage({
-      type: "MEDHUNT_PLATFORM_SCAN_PROGRESS",
+      type: "RADIXSOL_PLATFORM_SCAN_PROGRESS",
       platform: "indeed",
       found,
       total,
@@ -903,7 +903,7 @@
     const y = Math.max(2, Math.min(window.innerHeight - 2, Math.round(rect.top + rect.height / 2)));
     return new Promise((resolve) => {
       chrome.runtime.sendMessage(
-        { type: "MEDHUNT_TRUSTED_INDEED_CLICK", x, y },
+        { type: "RADIXSOL_TRUSTED_INDEED_CLICK", x, y },
         (response) => {
           const error = chrome.runtime.lastError;
           if (error) resolve({ ok: false, error: error.message });
@@ -1180,29 +1180,29 @@
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const messageType = message?.type === ADAPTER_REQUEST ? message.original_type : message?.type;
     const respond = (payload) => sendResponse({ ...payload, adapter_revision: ADAPTER_REVISION });
-    if (["MEDHUNT_INDEED_PING", "MEDHUNT_PLATFORM_PING"].includes(messageType)) {
+    if (["RADIXSOL_INDEED_PING", "RADIXSOL_PLATFORM_PING"].includes(messageType)) {
       respond({ ok: true, platform: "indeed", label: "Indeed", url: location.href, version: "5" });
       return false;
     }
-    if (["MEDHUNT_CAPTURE_INDEED_PROFILE", "MEDHUNT_CAPTURE_PLATFORM_PROFILE"].includes(messageType)) {
+    if (["RADIXSOL_CAPTURE_INDEED_PROFILE", "RADIXSOL_CAPTURE_PLATFORM_PROFILE"].includes(messageType)) {
       respond(captureProfile());
       return false;
     }
-    if (["MEDHUNT_LIST_INDEED_CANDIDATES", "MEDHUNT_LIST_PLATFORM_CANDIDATES"].includes(messageType)) {
+    if (["RADIXSOL_LIST_INDEED_CANDIDATES", "RADIXSOL_LIST_PLATFORM_CANDIDATES"].includes(messageType)) {
       respond(scanDisplayedCandidates());
       return false;
     }
-    if (["MEDHUNT_SCAN_INDEED_CANDIDATES", "MEDHUNT_SCAN_PLATFORM_CANDIDATES"].includes(messageType)) {
+    if (["RADIXSOL_SCAN_INDEED_CANDIDATES", "RADIXSOL_SCAN_PLATFORM_CANDIDATES"].includes(messageType)) {
       scanDisplayedCandidatesProgressively()
         .then(respond)
         .catch((error) => respond({ ok: false, error: String(error) }));
       return true;
     }
-    if (["MEDHUNT_OPEN_INDEED_CANDIDATE", "MEDHUNT_OPEN_PLATFORM_CANDIDATE"].includes(messageType)) {
+    if (["RADIXSOL_OPEN_INDEED_CANDIDATE", "RADIXSOL_OPEN_PLATFORM_CANDIDATE"].includes(messageType)) {
       respond(openDisplayedCandidate(message.index));
       return false;
     }
-    if (messageType === "MEDHUNT_DOWNLOAD_INDEED_RESUME") {
+    if (messageType === "RADIXSOL_DOWNLOAD_INDEED_RESUME") {
       downloadDisplayedCandidateResume(message.index, message.expectedName)
         .then(respond)
         .catch((error) => respond({ ok: false, error: String(error?.message || error) }));
@@ -1236,7 +1236,7 @@
       if (!signature && !hadResults) return;
       chrome.runtime.sendMessage(
         {
-          type: "MEDHUNT_PLATFORM_RESULTS_CHANGED",
+          type: "RADIXSOL_PLATFORM_RESULTS_CHANGED",
           platform: "indeed",
           count: signature ? signature.split("|").length : 0,
           page_url: location.href,

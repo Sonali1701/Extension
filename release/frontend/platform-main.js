@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  if (window.__medhuntPlatformMainLoaded) return;
-  window.__medhuntPlatformMainLoaded = true;
+  if (window.__radixsolPlatformMainLoaded) return;
+  window.__radixsolPlatformMainLoaded = true;
 
   function plainText(value) {
     return value == null ? "" : String(value).trim();
@@ -76,7 +76,7 @@
   }
 
   window.addEventListener("message", (event) => {
-    if (event.source !== window || event.data?.type !== "MEDHUNT_PLATFORM_MAIN_REQUEST") return;
+    if (event.source !== window || event.data?.type !== "RADIXSOL_PLATFORM_MAIN_REQUEST") return;
     const requestId = plainText(event.data.requestId);
     if (!requestId) return;
     let candidates = [];
@@ -89,7 +89,7 @@
       error = plainText(caught?.message || caught);
     }
     window.postMessage({
-      type: "MEDHUNT_PLATFORM_MAIN_RESPONSE",
+      type: "RADIXSOL_PLATFORM_MAIN_RESPONSE",
       requestId,
       candidates,
       error,

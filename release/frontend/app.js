@@ -7,6 +7,7 @@ const HOSTED_AUTH_REQUIRED = IS_EXTENSION && DEFAULT_BACKEND.startsWith("https:/
 const LOCAL_API_TOKEN = "__MEDHUNT_LOCAL_API_TOKEN__";
 const BACKEND_STORAGE_KEY = "medhuntBenchmarkABackendUrl";
 const AUTH_STORAGE_KEY = "medhuntHealthBoardSession";
+const DEVICE_STORAGE_KEY = "medhuntExtensionInstallationId";
 const PRIVACY_CONSENT_KEY = "medhuntProfileDataConsentV1";
 const STAGES = ["new", "enriched", "contacted", "replied", "submitted", "rejected"];
 const CONTACT_BATCH_SIZE = 100;
@@ -25,7 +26,7 @@ const SOURCING_PLATFORMS = {
     contentScript: "indeed-content.js",
     mainScript: "inject.js",
     adapterRevision: "indeed-capture-v5",
-    adapterRequestType: "MEDHUNT_INDEED_V5_REQUEST",
+    adapterRequestType: "RADIXSOL_INDEED_V5_REQUEST",
     resumeCapture: true,
   },
   vivian: {
@@ -34,7 +35,7 @@ const SOURCING_PLATFORMS = {
     host: (hostname) => hostname === "vivian.com" || hostname.endsWith(".vivian.com"),
     contentScript: "platform-content.js",
     adapterRevision: "platform-capture-v2",
-    adapterRequestType: "MEDHUNT_PLATFORM_V2_REQUEST",
+    adapterRequestType: "RADIXSOL_PLATFORM_V2_REQUEST",
     resumeCapture: false,
   },
   ziprecruiter: {
@@ -44,7 +45,7 @@ const SOURCING_PLATFORMS = {
     contentScript: "platform-content.js",
     mainScript: "platform-main.js",
     adapterRevision: "platform-capture-v2",
-    adapterRequestType: "MEDHUNT_PLATFORM_V2_REQUEST",
+    adapterRequestType: "RADIXSOL_PLATFORM_V2_REQUEST",
     resumeCapture: false,
   },
   linkedin: {
@@ -53,7 +54,7 @@ const SOURCING_PLATFORMS = {
     host: (hostname) => hostname === "linkedin.com" || hostname.endsWith(".linkedin.com"),
     contentScript: "linkedin-content.js",
     adapterRevision: "linkedin-capture-v4",
-    adapterRequestType: "MEDHUNT_LINKEDIN_V2_REQUEST",
+    adapterRequestType: "RADIXSOL_LINKEDIN_V2_REQUEST",
     resumeCapture: false,
     guidedPdfCapture: true,
     automaticPdfCapture: true,
@@ -65,7 +66,7 @@ const SOURCING_PLATFORMS = {
     host: (hostname) => hostname === "facebook.com" || hostname.endsWith(".facebook.com"),
     contentScript: "facebook-content.js",
     adapterRevision: "facebook-profile-v8",
-    adapterRequestType: "MEDHUNT_FACEBOOK_V8_REQUEST",
+    adapterRequestType: "RADIXSOL_FACEBOOK_V8_REQUEST",
     resumeCapture: false,
     guidedPdfCapture: false,
     singleProfile: true,
@@ -75,8 +76,8 @@ const SOURCING_PLATFORMS = {
     label: "NPI No.",
     host: (hostname) => hostname === "npino.com" || hostname.endsWith(".npino.com"),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v9",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V9_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   nysed: {
@@ -84,8 +85,8 @@ const SOURCING_PLATFORMS = {
     label: "NYSED",
     host: (hostname) => hostname === "eservices.nysed.gov",
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v9",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V9_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   npiprofile: {
@@ -93,8 +94,8 @@ const SOURCING_PLATFORMS = {
     label: "NPI Profile",
     host: (hostname) => hostname === "npiprofile.com" || hostname.endsWith(".npiprofile.com"),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v9",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V9_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   usnews: {
@@ -103,8 +104,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => hostname === "health.usnews.com" &&
       /^\/(?:doctors|nurse-practitioners)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v9",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V9_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   medifind: {
@@ -113,8 +114,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => (hostname === "medifind.com" || hostname.endsWith(".medifind.com"))
       && /^\/(?:doctors|specialty)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v9",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V9_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   commonspirit: {
@@ -123,8 +124,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => (hostname === "commonspirit.org" || hostname.endsWith(".commonspirit.org"))
       && /^\/(?:search|find-a-(?:doctor|location))(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v9",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V9_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
   sharecare: {
@@ -133,17 +134,30 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => hostname === "providers.sharecare.com"
       && /^\/(?:find-a-doctor|doctor)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v9",
-    adapterRequestType: "MEDHUNT_HEALTHCARE_DIRECTORY_V9_REQUEST",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    resumeCapture: false,
+  },
+  webmd: {
+    key: "webmd",
+    label: "WebMD",
+    host: (hostname, url) => hostname === "doctor.webmd.com"
+      && (/^\/results(?:\/|$)/i.test(url?.pathname || "")
+        || /^\/providers\/specialty(?:\/|$)/i.test(url?.pathname || "")
+        || /^\/doctor\/[^/]+-overview\/?$/i.test(url?.pathname || "")),
+    contentScript: "healthcare-directory-content.js",
+    adapterRevision: "healthcare-directory-v10",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
     resumeCapture: false,
   },
 };
-const PROFESSIONAL_PROFILE_SOURCES = new Set(["usnews", "medifind", "commonspirit", "sharecare"]);
+const PROFESSIONAL_PROFILE_SOURCES = new Set(["usnews", "medifind", "commonspirit", "sharecare", "webmd"]);
 
 let apiBase = IS_EXTENSION ? DEFAULT_BACKEND : "";
 let backendHealth = null;
 let authConfig = { enabled: false, provider: "healthboard" };
 let authSession = null;
+let extensionDeviceId = "";
 let privacyConsent = false;
 let extensionWorkspaceStarted = false;
 let extensionWorkspaceStarting = false;
@@ -239,6 +253,7 @@ function setBusy(button, busy) {
 
 function friendlyActionError(error) {
   const message = String(error?.message || "");
+  if (/device|installation|approval/i.test(message) && /registered|approved|revoked|expired|waiting/i.test(message)) return message;
   if (
     Number(error?.status) === 401 ||
     /invalid local api token|unauthorized|authentication required/i.test(message)
@@ -278,6 +293,7 @@ async function api(path, options = {}) {
   const timer = setTimeout(() => controller.abort(), timeout);
 
   try {
+    await ensureExtensionDeviceId();
     const headers = authenticatedApiHeaders(fetchOptions.headers);
     const response = await fetch(`${apiBase}${path}`, {
       ...fetchOptions,
@@ -366,8 +382,9 @@ function normalizeBackendUrl(raw) {
   } catch {
     throw new Error("Enter a valid backend URL.");
   }
-  if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
-    throw new Error("Use an HTTPS hosted backend.");
+  const local = parsed.protocol === "http:" && ["127.0.0.1", "localhost"].includes(parsed.hostname);
+  if ((!local && parsed.protocol !== "https:") || parsed.username || parsed.password) {
+    throw new Error("Use HTTP on localhost for development or HTTPS for a hosted backend.");
   }
   return parsed.origin;
 }
@@ -815,13 +832,37 @@ function authenticatedApiHeaders(initialHeaders = {}) {
   if (authSession?.extension_token) {
     headers.set("X-HealthBoard-Extension-Token", authSession.extension_token);
   }
+  if (extensionDeviceId) headers.set("X-Medhunt-Device-ID", extensionDeviceId);
   return headers;
+}
+
+function extensionDeviceName() {
+  const platform = navigator.userAgentData?.platform || navigator.platform || "Computer";
+  const browser = /Edg\//.test(navigator.userAgent)
+    ? "Edge"
+    : /Chrome\//.test(navigator.userAgent) ? "Chrome" : "Browser";
+  return `${platform} · ${browser}`.slice(0, 200);
+}
+
+async function ensureExtensionDeviceId() {
+  if (!IS_EXTENSION) return "";
+  if (extensionDeviceId) return extensionDeviceId;
+  let value = await readChromeSetting(DEVICE_STORAGE_KEY);
+  if (!/^[A-Za-z0-9_-]{40,64}$/.test(String(value || ""))) {
+    const bytes = crypto.getRandomValues(new Uint8Array(32));
+    const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+    value = btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    await writeChromeSetting(DEVICE_STORAGE_KEY, value);
+  }
+  extensionDeviceId = value;
+  return extensionDeviceId;
 }
 
 async function fetchStoredResumeBlob(candidateId, resumeId) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 60000);
   try {
+    await ensureExtensionDeviceId();
     const response = await fetch(
       `${apiBase}/candidates/${Number(candidateId)}/resumes/${Number(resumeId)}`,
       { headers: authenticatedApiHeaders(), signal: controller.signal },
@@ -855,6 +896,7 @@ function releaseResumeBlobUrlLater(url, delay = 300000) {
 
 async function loadAuth() {
   if (!IS_EXTENSION) return;
+  await ensureExtensionDeviceId();
 
 
   authSession = await readChromeSession(AUTH_STORAGE_KEY) || null;
@@ -873,6 +915,18 @@ async function loadAuth() {
   }
   if (authConfig.enabled && authSession?.extension_token) {
     try {
+      if (authSession.device_pending) {
+        const status = await api("/auth/device-status", { timeout: 30000 });
+        if (!status.approved) {
+          authSession.device = status.device;
+          await writeChromeSession(AUTH_STORAGE_KEY, authSession);
+          renderAuthState();
+          return;
+        }
+        authSession.device_pending = false;
+        authSession.device = status.device;
+        authSession.user = status.user;
+      }
       const current = await api("/auth/me", { timeout: 30000 });
       authSession.user = current.user;
       await writeChromeSession(AUTH_STORAGE_KEY, authSession);
@@ -880,8 +934,13 @@ async function loadAuth() {
 
 
       if ([401, 403].includes(Number(error?.status))) {
-        authSession = null;
-        await writeChromeSession(AUTH_STORAGE_KEY, null);
+        if (/waiting for approval/i.test(String(error?.message || ""))) {
+          authSession.device_pending = true;
+          await writeChromeSession(AUTH_STORAGE_KEY, authSession);
+        } else {
+          authSession = null;
+          await writeChromeSession(AUTH_STORAGE_KEY, null);
+        }
       }
     }
   }
@@ -896,8 +955,8 @@ function renderAuthState() {
     const user = authSession.user;
     avatar.textContent = initials(user.name || user.email || "User");
     avatar.setAttribute("aria-label", user.name || user.email || "Signed-in user");
-    button.textContent = "Sign out";
-    button.dataset.action = "logout";
+    button.textContent = authSession.device_pending ? "Approval pending" : "Account";
+    button.dataset.action = authSession.device_pending ? "check-device-approval" : "account";
   } else if (authConfig.enabled) {
     avatar.textContent = "?";
     avatar.setAttribute("aria-label", "Sign in to Medhunt");
@@ -970,11 +1029,18 @@ async function verifyLoginCode() {
   const loginConsent = Boolean(pendingLogin.privacyConsent);
   const verified = await api("/auth/verify-code", {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ ...pendingLogin, code }), timeout: 15000,
+    body: JSON.stringify({
+      ...pendingLogin,
+      code,
+      device_id: await ensureExtensionDeviceId(),
+      device_name: extensionDeviceName(),
+    }), timeout: 15000,
   });
   authSession = {
     extension_token: verified.extension_token,
     user: verified.user,
+    device: verified.device,
+    device_pending: verified.device_approval_required === true,
   };
   await writeChromeSession(AUTH_STORAGE_KEY, authSession);
   if (loginConsent) {
@@ -982,8 +1048,12 @@ async function verifyLoginCode() {
     await writeChromeSetting(PRIVACY_CONSENT_KEY, true);
   }
   pendingLogin = null;
-  closeModal();
   renderAuthState();
+  if (authSession.device_pending) {
+    showPendingDeviceApproval();
+    return;
+  }
+  closeModal();
   if (!extensionWorkspaceStarted && privacyConsent) {
     await startExtensionWorkspace();
     notify(`Signed in as ${verified.user.email}.`);
@@ -999,7 +1069,104 @@ async function logout() {
   authSession = null;
   await writeChromeSession(AUTH_STORAGE_KEY, null);
   renderAuthState();
+  closeModal();
   notify("Signed out.");
+}
+
+function deviceTimestamp(value) {
+  const timestamp = Number(value || 0);
+  return timestamp ? new Date(timestamp * 1000).toLocaleString() : "Not yet";
+}
+
+function showPendingDeviceApproval() {
+  const device = authSession?.device || {};
+  $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="devicePendingTitle">
+      <div class="privacy-dialog-header">
+        <img class="privacy-dialog-logo" src="icons/medhunt-logo.png" alt="" aria-hidden="true">
+        <div><span class="privacy-eyebrow">Device security</span><h2 id="devicePendingTitle">Approval required</h2></div>
+      </div>
+      <p>This installation is signed in, but it cannot access candidate data yet.</p>
+      <div class="notice"><strong>${escapeHtml(device.device_name || extensionDeviceName())}</strong><br><span class="muted small">Request ending ${escapeHtml(device.installation_suffix || "")}</span></div>
+      <p class="muted small">Ask an administrator or approve this request from an existing Medhunt device. No verification code needs to be shared.</p>
+      <div class="row modal-actions">
+        <button type="button" class="btn ghost" data-action="logout">Cancel sign-in</button>
+        <button type="button" class="btn teal" data-action="check-device-approval">Check approval</button>
+      </div>
+    </div></div>`;
+}
+
+async function checkDeviceApproval() {
+  if (!authSession?.extension_token) return login();
+  const status = await api("/auth/device-status", { timeout: 30000 });
+  authSession.device = status.device;
+  authSession.user = status.user;
+  authSession.device_pending = !status.approved;
+  await writeChromeSession(AUTH_STORAGE_KEY, authSession);
+  renderAuthState();
+  if (!status.approved) {
+    showPendingDeviceApproval();
+    notify("This device is still waiting for approval.");
+    return;
+  }
+  closeModal();
+  notify("This device is approved.");
+  if (!privacyConsent) {
+    showPrivacyConsent();
+    return;
+  }
+  await startExtensionWorkspace();
+}
+
+function deviceCard(device) {
+  const owner = device.user_name || device.user_email || device.user_id || "Account user";
+  const canApprove = ["pending", "expired"].includes(device.status);
+  const canRevoke = device.status !== "revoked" && !device.current;
+  return `<div class="device-row">
+    <div class="device-row-main">
+      <div class="row spread"><strong>${escapeHtml(device.device_name || "Medhunt browser")}</strong><span class="pill ${device.status === "approved" ? "live" : ""}">${escapeHtml(device.status)}</span></div>
+      <span class="muted small">${escapeHtml(owner)}${device.current ? " · This device" : ""}</span>
+      <span class="muted small">Last used ${escapeHtml(deviceTimestamp(device.last_seen))} · ID …${escapeHtml(device.installation_suffix || "")}</span>
+    </div>
+    <div class="row device-actions">
+      ${canApprove ? `<button type="button" class="btn sm teal" data-action="approve-device" data-device-id="${Number(device.id)}">Approve</button>` : ""}
+      ${canRevoke ? `<button type="button" class="btn sm ghost" data-action="revoke-device" data-device-id="${Number(device.id)}">Revoke</button>` : ""}
+    </div>
+  </div>`;
+}
+
+async function showAccount() {
+  const result = await api("/auth/devices");
+  const devices = result.items || [];
+  $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
+    <div class="dialog device-dialog" role="dialog" aria-modal="true" aria-labelledby="deviceAccountTitle">
+      <div class="privacy-dialog-header">
+        <img class="privacy-dialog-logo" src="icons/medhunt-logo.png" alt="" aria-hidden="true">
+        <div><span class="privacy-eyebrow">Account security</span><h2 id="deviceAccountTitle">Registered devices</h2></div>
+      </div>
+      <p class="muted small">Up to ${Number(result.max_approved_devices || 2)} devices can be approved. New installations cannot access candidate data until approved here or by an administrator.</p>
+      <div class="device-list">${devices.length ? devices.map(deviceCard).join("") : `<p class="muted">No registered devices.</p>`}</div>
+      <div class="row modal-actions">
+        <button type="button" class="btn ghost" data-action="logout">Sign out</button>
+        <button type="button" class="btn" data-action="close-modal">Close</button>
+      </div>
+    </div></div>`;
+}
+
+async function approveDevice(button) {
+  await api(`/auth/devices/${Number(button.dataset.deviceId)}/approve`, { method: "POST" });
+  notify("Device approved.");
+  await showAccount();
+}
+
+async function revokeDevice(button) {
+  await api(`/auth/devices/${Number(button.dataset.deviceId)}/revoke`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: "Revoked from Medhunt account settings" }),
+  });
+  notify("Device access revoked.");
+  await showAccount();
 }
 
 function showPrivacyConsent() {
@@ -1077,7 +1244,7 @@ function sourcingPageEligibility(platform, value) {
     return { eligible, reason: eligible ? "" : "linkedin-route" };
   }
   if (platform.key === "facebook") {
-    const eligible = Boolean(globalThis.MedhuntProfileQuality?.validProfileUrl(url.href, "facebook"));
+    const eligible = Boolean(globalThis.RadixsolProfileQuality?.validProfileUrl(url.href, "facebook"));
     return { eligible, reason: eligible ? "" : "facebook-route" };
   }
   return { eligible: true, reason: "" };
@@ -1217,11 +1384,11 @@ async function sendIndeedResumeMessage(message, sourceTabId = 0) {
 }
 
 async function captureIndeedProfile() {
-  const result = await sendSourcingMessage({ type: "MEDHUNT_CAPTURE_PLATFORM_PROFILE" });
+  const result = await sendSourcingMessage({ type: "RADIXSOL_CAPTURE_PLATFORM_PROFILE" });
   if (!result?.ok) {
     throw new Error(result?.error || `The visible ${activeSourcingPlatform.label} profile could not be read.`);
   }
-  const checked = globalThis.MedhuntProfileQuality?.sanitizeProfile(result.profile, {
+  const checked = globalThis.RadixsolProfileQuality?.sanitizeProfile(result.profile, {
     platform: activeSourcingPlatform.key,
     pageUrl: result.page_url || activeSourcingPageUrl,
     singleProfile: true,
@@ -1379,7 +1546,7 @@ async function captureProfessionalProfileInBackground(profile, timeoutMs = 45000
 
     const message = {
       type: platform.adapterRequestType,
-      original_type: "MEDHUNT_CAPTURE_PLATFORM_PROFILE",
+      original_type: "RADIXSOL_CAPTURE_PLATFORM_PROFILE",
     };
     let lastError = null;
     while (Date.now() < deadline) {
@@ -1439,6 +1606,39 @@ function professionalProfileImportPayload(profile) {
 
 
 
+async function hydrateStoredResume(profile) {
+  const candidateId = Number(profile?._candidateId);
+  if (!candidateId) return null;
+  try {
+    const candidate = await api(`/candidates/${candidateId}`, { timeout: 15000 });
+    const resume = Array.isArray(candidate?.resumes) ? candidate.resumes[0] : null;
+    if (!resume || !Number(resume.id)) return null;
+    // A public-profile PDF may have been stored before the contact lookup
+    // completed. Do not reuse that un-enriched snapshot; rebuild it so the
+    // downloaded PDF receives the current Medhunt contact sheet.
+    const hasContacts = Boolean(
+      (Array.isArray(candidate?.emails) && candidate.emails.length)
+      || (Array.isArray(candidate?.phones) && candidate.phones.length),
+    );
+    const hasContactSheet = /\s-\s+enriched\.pdf$/i.test(String(resume.filename || ""));
+    if (hasContacts && !hasContactSheet) return null;
+    const current = indeedLookupFor(profile);
+    indeedLookupState.set(profile._selectionKey, {
+      ...current,
+      resume,
+      resume_status: "stored",
+      resume_error: "",
+    });
+    updateIndeedLookupProgressUi(profile);
+    return resume;
+  } catch {
+    return null;
+  }
+}
+
+
+
+
 
 function profileSpecialties(profile, list) {
   const values = [profile?.specialty, ...(Array.isArray(profile?.specialties) ? profile.specialties : [])];
@@ -1492,29 +1692,33 @@ async function enrichProfessionalProfileAndResume(profile) {
 }
 
 function startProfessionalProfileResumeBatch(profiles) {
-  const queue = (profiles || []).filter((profile) => (
+  const pending = (profiles || []).filter((profile) => (
     PROFESSIONAL_PROFILE_SOURCES.has(profile?.source)
       && Number(profile._candidateId)
       && (!indeedLookupFor(profile).resume || !profile._detailProfileCaptured)
   ));
-  if (!queue.length || indeedResumeBatchState.active) return Promise.resolve();
-
-  const first = queue[0];
-  indeedResumeBatchState = {
-    active: true,
-    total: queue.length,
-    processed: 0,
-    saved: 0,
-    failed: 0,
-    sourceTabId: Number(first._sourceTabId || activeSourcingTabId),
-    sourceWindowId: Number(first._sourceWindowId || activeSourcingWindowId),
-    sourceContextKey: String(first._sourceContextKey || activeSourcingContextKey),
-    sourcePageUrl: String(activeSourcingPageUrl || first.source_url || ""),
-    platform: first.source,
-  };
-  updateSourceHeaderProgressUi();
+  if (!pending.length || indeedResumeBatchState.active) return Promise.resolve();
 
   return (async () => {
+    const queue = [];
+    for (const profile of pending) {
+      if (!(await hydrateStoredResume(profile))) queue.push(profile);
+    }
+    if (!queue.length) return;
+    const first = queue[0];
+    indeedResumeBatchState = {
+      active: true,
+      total: queue.length,
+      processed: 0,
+      saved: 0,
+      failed: 0,
+      sourceTabId: Number(first._sourceTabId || activeSourcingTabId),
+      sourceWindowId: Number(first._sourceWindowId || activeSourcingWindowId),
+      sourceContextKey: String(first._sourceContextKey || activeSourcingContextKey),
+      sourcePageUrl: String(activeSourcingPageUrl || first.source_url || ""),
+      platform: first.source,
+    };
+    updateSourceHeaderProgressUi();
     try {
       for (const profile of queue) {
         let saved = false;
@@ -2260,7 +2464,7 @@ async function ensureProfessionalProfileResume(profile) {
   const candidateId = Number(profile?._candidateId);
   const documentProfile = profile?.profile_document;
   if (
-    !["usnews", "medifind", "commonspirit", "sharecare"].includes(profile?.source) || !candidateId
+    !["usnews", "medifind", "commonspirit", "sharecare", "webmd"].includes(profile?.source) || !candidateId
     || documentProfile?.kind !== "public_professional_profile"
   ) return null;
   const key = `${candidateId}|${JSON.stringify(documentProfile)}`;
@@ -2528,8 +2732,8 @@ async function scanIndeedCandidates(options = {}) {
       previousSelection.size === indeedCandidates.length;
     const result = await sendSourcingMessage({
       type: quiet
-        ? "MEDHUNT_LIST_PLATFORM_CANDIDATES"
-        : "MEDHUNT_SCAN_PLATFORM_CANDIDATES",
+        ? "RADIXSOL_LIST_PLATFORM_CANDIDATES"
+        : "RADIXSOL_SCAN_PLATFORM_CANDIDATES",
     }, false, scanContext);
     if (IS_EXTENSION && scanContext) {
       const [latestTab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -2585,7 +2789,7 @@ async function scanIndeedCandidates(options = {}) {
       (quiet && indeedLookupInProgress)
     ) return;
     activeSourcingPageUrl = result.page_url || activeSourcingPageUrl;
-    const quality = globalThis.MedhuntProfileQuality?.sanitizeProfiles(
+    const quality = globalThis.RadixsolProfileQuality?.sanitizeProfiles(
       result.profiles || [],
       {
         platform: activeSourcingPlatform.key,
@@ -2774,7 +2978,7 @@ function scheduleActiveSourcingSync(reason = "changed", delay = 180) {
 
 if (IS_EXTENSION) {
   chrome.runtime.onMessage.addListener((message, sender) => {
-    if (message?.type === "MEDHUNT_ACTIVE_TAB_CHANGED") {
+    if (message?.type === "RADIXSOL_ACTIVE_TAB_CHANGED") {
       if (sourcingWorkInProgress()) pendingSourcingContext = message;
       else if (
         message.platform === "indeed" &&
@@ -2783,11 +2987,11 @@ if (IS_EXTENSION) {
       else scheduleActiveSourcingSync(message.reason || "changed", message.status === "complete" ? 120 : 240);
       return false;
     }
-    if (message?.type === "MEDHUNT_RESUME_DOWNLOADED") {
+    if (message?.type === "RADIXSOL_RESUME_DOWNLOADED") {
       handleDownloadedResume(message);
       return false;
     }
-    if (message?.type === "MEDHUNT_LINKEDIN_PDF_CAPTURE_STARTED") {
+    if (message?.type === "RADIXSOL_LINKEDIN_PDF_CAPTURE_STARTED") {
       const profile = indeedCandidates.find(
         (candidate) => Number(candidate._candidateId) === Number(message.candidateId),
       );
@@ -2802,7 +3006,7 @@ if (IS_EXTENSION) {
       }
       return false;
     }
-    if (message?.type === "MEDHUNT_LINKEDIN_PDF_CAPTURE_FAILED") {
+    if (message?.type === "RADIXSOL_LINKEDIN_PDF_CAPTURE_FAILED") {
       const profile = indeedCandidates.find(
         (candidate) => Number(candidate._candidateId) === Number(message.candidateId),
       );
@@ -2825,7 +3029,7 @@ if (IS_EXTENSION) {
       return false;
     }
     if (
-      ["MEDHUNT_PLATFORM_SCAN_PROGRESS", "MEDHUNT_PLATFORM_RESULTS_CHANGED"].includes(message?.type) &&
+      ["RADIXSOL_PLATFORM_SCAN_PROGRESS", "RADIXSOL_PLATFORM_RESULTS_CHANGED"].includes(message?.type) &&
       sender?.tab?.id && (
         sender.tab.active === false || Number(sender.tab.id) !== Number(activeSourcingTabId)
       )
@@ -2839,7 +3043,7 @@ if (IS_EXTENSION) {
         )
       )
     ) return false;
-    if (message?.type === "MEDHUNT_PLATFORM_SCAN_PROGRESS") {
+    if (message?.type === "RADIXSOL_PLATFORM_SCAN_PROGRESS") {
       if (message.platform && message.platform !== activeSourcingPlatform?.key) return false;
       indeedScanState = {
         phase: "scanning",
@@ -2865,7 +3069,7 @@ if (IS_EXTENSION) {
       }
       return false;
     }
-    if (message?.type !== "MEDHUNT_PLATFORM_RESULTS_CHANGED") return false;
+    if (message?.type !== "RADIXSOL_PLATFORM_RESULTS_CHANGED") return false;
     if (message.platform && message.platform !== activeSourcingPlatform?.key) return false;
     const facebookIdentityChanged = message.platform === "facebook" && message.identity_changed === true;
     if (facebookIdentityChanged) {
@@ -2903,13 +3107,13 @@ async function openIndeedResult(index) {
   const profile = indeedCandidates[index];
   if (!profile) throw new Error("That displayed candidate is no longer available.");
   const result = await sendSourcingMessage({
-    type: "MEDHUNT_OPEN_PLATFORM_CANDIDATE",
+    type: "RADIXSOL_OPEN_PLATFORM_CANDIDATE",
     index: profile.result_index ?? index,
   });
   if (!result?.ok) throw new Error(result?.error || `${activeSourcingPlatform.label} could not open that candidate.`);
   if (profile._candidateId && activeSourcingPlatform.resumeCapture) {
     await sendExtensionMessage({
-      type: "MEDHUNT_SET_ACTIVE_CANDIDATE",
+      type: "RADIXSOL_SET_ACTIVE_CANDIDATE",
       candidateId: profile._candidateId,
       name: profile.name,
       sourceId: profile.source_id || "",
@@ -2950,7 +3154,7 @@ async function captureLinkedinPdf(index) {
   }
 
   const armed = await sendExtensionMessage({
-    type: "MEDHUNT_ARM_LINKEDIN_PDF_CAPTURE",
+    type: "RADIXSOL_ARM_LINKEDIN_PDF_CAPTURE",
     tabId: tab.id,
     candidateId: profile._candidateId,
     name: profile.name,
@@ -2961,7 +3165,7 @@ async function captureLinkedinPdf(index) {
   let guide = null;
   const guideRequest = {
     type: SOURCING_PLATFORMS.linkedin.adapterRequestType,
-    original_type: "MEDHUNT_AUTO_LINKEDIN_PDF",
+    original_type: "RADIXSOL_AUTO_LINKEDIN_PDF",
   };
   try {
     guide = await sendTabMessage(tab.id, guideRequest);
@@ -2973,7 +3177,7 @@ async function captureLinkedinPdf(index) {
     guide = await sendTabMessage(tab.id, guideRequest);
   }
   if (!guide?.ok) {
-    await sendExtensionMessage({ type: "MEDHUNT_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
+    await sendExtensionMessage({ type: "RADIXSOL_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
     throw new Error(guide?.error || "LinkedIn did not make Save to PDF available.");
   }
   await chrome.tabs.update(tab.id, { active: true });
@@ -2987,7 +3191,7 @@ async function captureLinkedinPdf(index) {
   const candidateId = Number(profile._candidateId);
   clearTimeout(linkedinPdfCaptureTimers.get(candidateId));
   linkedinPdfCaptureTimers.set(candidateId, setTimeout(async () => {
-    await sendExtensionMessage({ type: "MEDHUNT_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
+    await sendExtensionMessage({ type: "RADIXSOL_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
     const latest = indeedLookupFor(profile);
     if (["armed", "downloading"].includes(latest.resume_status)) {
       indeedLookupState.set(profile._selectionKey, {
@@ -3020,7 +3224,7 @@ async function captureLinkedinPdf(index) {
 }
 
 async function cancelLinkedinPdf(index) {
-  await sendExtensionMessage({ type: "MEDHUNT_DISARM_LINKEDIN_PDF_CAPTURE" });
+  await sendExtensionMessage({ type: "RADIXSOL_DISARM_LINKEDIN_PDF_CAPTURE" });
   const profile = indeedCandidates[index];
   if (profile) {
     clearTimeout(linkedinPdfCaptureTimers.get(Number(profile._candidateId)));
@@ -3331,7 +3535,7 @@ async function handleDownloadedResume(message) {
     waiter?.resolve(resume);
     if (eventId) {
       await sendExtensionMessage({
-        type: "MEDHUNT_ACK_RESUME_EVENT",
+        type: "RADIXSOL_ACK_RESUME_EVENT",
         event_id: eventId,
       }).catch(() => {});
     }
@@ -3363,7 +3567,7 @@ async function handleDownloadedResume(message) {
 async function processPendingResumeEvents() {
   if (!IS_EXTENSION || !backendHealth) return;
   const pending = await sendExtensionMessage({
-    type: "MEDHUNT_GET_PENDING_RESUME_EVENTS",
+    type: "RADIXSOL_GET_PENDING_RESUME_EVENTS",
   }).catch(() => ({ events: [] }));
   for (const event of pending?.events || []) await handleDownloadedResume(event);
 }
@@ -3420,6 +3624,7 @@ async function downloadMatchedLinkedinPdf(profile, sourceTabId) {
     profile?.source !== "linkedin" || !candidateId || current.resume ||
     current.status !== "found" || !linkedinSlug(profile.source_url || "")
   ) return false;
+  if (await hydrateStoredResume(profile)) return true;
 
   indeedLookupState.set(profile._selectionKey, {
     ...current,
@@ -3438,7 +3643,7 @@ async function downloadMatchedLinkedinPdf(profile, sourceTabId) {
     await wait(650);
 
     const armed = await sendExtensionMessage({
-      type: "MEDHUNT_ARM_LINKEDIN_PDF_CAPTURE",
+      type: "RADIXSOL_ARM_LINKEDIN_PDF_CAPTURE",
       tabId: Number(sourceTabId),
       candidateId,
       name: profile.name,
@@ -3447,14 +3652,14 @@ async function downloadMatchedLinkedinPdf(profile, sourceTabId) {
     if (!armed?.ok) throw new Error(armed?.error || "LinkedIn PDF capture could not start.");
 
     completion = linkedinResumeCompletion(candidateId);
-    const started = await sendLinkedinPdfMessage(sourceTabId, "MEDHUNT_AUTO_LINKEDIN_PDF");
+    const started = await sendLinkedinPdfMessage(sourceTabId, "RADIXSOL_AUTO_LINKEDIN_PDF");
     if (!started?.ok) throw new Error(started?.error || "LinkedIn did not make Save to PDF available.");
     const resume = await completion.promise;
     await saveStoredResumeDownload(profile, candidateId, resume).catch(() => {});
     return true;
   } catch (error) {
     completion?.cancel(error);
-    await sendExtensionMessage({ type: "MEDHUNT_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
+    await sendExtensionMessage({ type: "RADIXSOL_DISARM_LINKEDIN_PDF_CAPTURE" }).catch(() => {});
     const latest = indeedLookupFor(profile);
     indeedLookupState.set(profile._selectionKey, {
       ...latest,
@@ -3643,6 +3848,7 @@ async function downloadMatchedIndeedResume(profile) {
   const candidateId = Number(profile._candidateId);
   const current = indeedLookupFor(profile);
   if (!candidateId || current.resume || !hasCompleteIndeedContact(current)) return false;
+  if (await hydrateStoredResume(profile)) return true;
 
   indeedLookupState.set(profile._selectionKey, {
     ...current,
@@ -3655,10 +3861,10 @@ async function downloadMatchedIndeedResume(profile) {
 
 
 
-    await sendExtensionMessage({ type: "MEDHUNT_CLEAR_ACTIVE_CANDIDATE" });
+    await sendExtensionMessage({ type: "RADIXSOL_CLEAR_ACTIVE_CANDIDATE" });
 
     const captured = await sendIndeedResumeMessage({
-      type: "MEDHUNT_DOWNLOAD_INDEED_RESUME",
+      type: "RADIXSOL_DOWNLOAD_INDEED_RESUME",
       index: profile.result_index,
       expectedName: profile.name,
     }, profile._sourceTabId);
@@ -4205,8 +4411,12 @@ document.addEventListener("click", async (event) => {
 
   const actions = {
     "login": login,
+    "account": showAccount,
     "request-login-code": requestLoginCode,
     "verify-login-code": verifyLoginCode,
+    "check-device-approval": checkDeviceApproval,
+    "approve-device": () => approveDevice(button),
+    "revoke-device": () => revokeDevice(button),
     "logout": logout,
     "open-privacy": openPrivacyNotice,
     "decline-privacy": declinePrivacyConsent,
@@ -4270,6 +4480,10 @@ async function startExtensionWorkspace() {
   extensionWorkspaceStarting = true;
   try {
     await loadAuth();
+    if (authConfig.enabled && authSession?.device_pending) {
+      showPendingDeviceApproval();
+      return;
+    }
     if (authConfig.enabled && !authSession?.extension_token) {
       await login();
       return;
@@ -4317,7 +4531,9 @@ async function startExtensionWorkspace() {
         "Medhunt will not read or transmit candidate profile data until you accept the data-use notice.",
         { retry: false },
       );
-      if (authConfig.enabled && !authSession?.extension_token) {
+      if (authConfig.enabled && authSession?.device_pending) {
+        showPendingDeviceApproval();
+      } else if (authConfig.enabled && !authSession?.extension_token) {
         await login({ requirePrivacyConsent: true });
       } else {
         showPrivacyConsent();

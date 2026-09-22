@@ -482,8 +482,8 @@ candidate; only a lookup run through the flow above stores contacts.
 
 ## Matched resume capture
 
-For Indeed only, after the provider waterfall produces an accepted phone
-number and email address, the
+For Indeed only, after the provider waterfall produces at least one accepted
+phone number or email address, the
 extension opens that exact candidate and trusted-clicks the normal
 **Download resume** action. A MAIN-world hook captures resume bytes produced by
 Blob, fetch, or XHR, with the browser download URL as a fallback. This avoids
@@ -491,7 +491,7 @@ depending only on Chrome's download-complete event. The PDF is uploaded to the
 private R2 bucket and its metadata is saved in Neon. If Indeed did not create a
 visible file itself, the extension explicitly saves the captured PDF under
 `Downloads/MedhuntResumes`. Profiles with only a phone or only an email are
-saved, but their resume is not captured automatically.
+also eligible for the same capture and Nexus delivery path.
 
 Each enriched resume shows one latest trusted phone. Medhunt
 keeps its existing contact policy: an accepted mobile/wireless number is
@@ -576,14 +576,14 @@ the original resume from being stored.
 Medhunt can automatically queue a newly saved enriched resume and its approved
 candidate data for LaborEdge Nexus. This is a backend-only integration: the
 extension receives neither Nexus credentials nor provider responses. Delivery
-is disabled by default and is queued only when the candidate has a current
-trusted email and phone. The resume row and durable delivery record are
+is disabled by default and is queued when the candidate has at least one
+current trusted email or phone. The resume row and durable delivery record are
 committed together, so restarting the service does not lose pending work.
 PDFs larger than the configured Nexus upload limit are saved locally but are
 reported as `skipped_resume_too_large` instead of entering a doomed queue.
 If a resume was stored before trusted contacts became available, the newest
-stored resume is queued automatically as soon as a later lookup supplies both
-approved channels.
+stored resume is queued automatically as soon as a later lookup supplies one
+approved channel.
 
 Set these backend variables for the authentication method supplied by Nexus:
 
@@ -610,6 +610,19 @@ the allowlisted settings from `NEXUS_REFERENCE_ENV` and
 For a hosted deployment, add the production Chrome extension origin after the
 Chrome Web Store assigns its ID:
 
+Healthcareboard-authenticated accounts use registered extension installations.
+The first device is approved automatically; every later installation remains
+pending until a Healthcareboard administrator approves it. Users can review and
+revoke their devices but cannot approve devices themselves. The account screen
+lists device names, last-use times, approval state, and revoke controls. Two approved devices are allowed by
+default, controlled by `MEDHUNT_MAX_REGISTERED_DEVICES` (1-5). Registrations
+expire after 90 inactive days by default, controlled by
+`MEDHUNT_DEVICE_IDLE_DAYS` (7-365), and can be restored by a fresh email-code
+sign-in. Revoked installations do not reactivate automatically. Approval,
+revocation, expiry, and registration events are retained in
+`extension_device_events`. Older extension builds that do not send an
+installation identifier must be updated before this backend is deployed.
+
 ```text
 MEDHUNT_EXTENSION_ORIGINS=chrome-extension://<32-character-extension-id>
 MEDHUNT_ALLOW_UNLISTED_EXTENSION_ORIGINS=0
@@ -630,10 +643,19 @@ mapping exists, Medhunt sends the tenant's explicit Unknown profession and
 Unknown specialty pair. Profiles without a declared specialty can still use
 the configured fallback, or the tenant's Unknown/Other/General master data.
 
-For contacts, Nexus receives one primary email and one primary phone. The
-email is the first trusted, non-DNC address in provider order. Phone selection
-prefers mobile/wireless over other callable lines, then current/recent evidence,
-connectivity, corroborating-source count, and finally stable provider order.
+For contacts, Nexus receives whichever trusted, non-DNC identifier is available:
+email, phone, or both. The email is the first trusted address in provider order.
+Phone selection prefers mobile/wireless over other callable lines, then
+current/recent evidence, connectivity, corroborating-source count, and finally
+stable provider order. Candidate creation and duplicate matching work with one
+identifier; a second identifier is included when available.
+
+Legacy source labels are normalized using the bundled
+`sourcing/data/legacy_taxonomy.csv` catalogue before live Nexus master-data
+resolution. This preserves the old profession/specialty vocabulary while
+still sending only the current Nexus IDs. Set
+`NEXUS_LEGACY_TAXONOMY_PATH` only when a deployment intentionally uses a
+different, reviewed taxonomy file.
 
 Before creation, Medhunt searches Nexus independently by trusted email and
 phone. A unique compatible record is reused; multiple candidates, conflicting

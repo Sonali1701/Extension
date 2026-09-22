@@ -2,10 +2,10 @@
   "use strict";
 
   const ADAPTER_REVISION = "linkedin-capture-v4";
-  const ADAPTER_REQUEST = "MEDHUNT_LINKEDIN_V2_REQUEST";
-  if (window.__medhuntLinkedinAdapterRevision === ADAPTER_REVISION) return;
-  window.__medhuntLinkedinAdapterRevision = ADAPTER_REVISION;
-  window.__medhuntLinkedinCaptureLoaded = true;
+  const ADAPTER_REQUEST = "RADIXSOL_LINKEDIN_V2_REQUEST";
+  if (window.__radixsolLinkedinAdapterRevision === ADAPTER_REVISION) return;
+  window.__radixsolLinkedinAdapterRevision = ADAPTER_REVISION;
+  window.__radixsolLinkedinCaptureLoaded = true;
 
   const PLATFORM = { key: "linkedin", label: "LinkedIn" };
   const RESULT_CARD_SELECTOR = [
@@ -51,7 +51,7 @@
     const y = Math.round(rect.top + (rect.height / 2));
     return new Promise((resolve) => {
       chrome.runtime.sendMessage(
-        { type: "MEDHUNT_TRUSTED_LINKEDIN_CLICK", x, y },
+        { type: "RADIXSOL_TRUSTED_LINKEDIN_CLICK", x, y },
         (response) => {
           if (chrome.runtime.lastError) {
             resolve({ ok: false, error: chrome.runtime.lastError.message });
@@ -664,8 +664,8 @@
       ".entity-result__secondary-subtitle",
       "[class*='entity-result__primary-subtitle']",
       "[class*='entity-result__secondary-subtitle']",
-      "[data-medhunt-field='headline']",
-      "[data-medhunt-field='location']",
+      "[data-radixsol-field='headline']",
+      "[data-radixsol-field='location']",
       "[class*='location']",
     ].join(","))) || lines.some((line) => (
       resultLocationCandidate(line, name) ||
@@ -749,7 +749,7 @@
       "[class*='entity-result__secondary-subtitle']",
       "[data-view-name*='search-result'] [class*='location']",
       "[data-view-name='people-search-result'] [class*='location']",
-      "[data-medhunt-field='location']",
+      "[data-radixsol-field='location']",
     ];
     for (const selector of trustedSelectors) {
       for (const element of card.querySelectorAll(selector)) {
@@ -794,7 +794,7 @@
       ".entity-result__primary-subtitle",
       "[class*='entity-result__primary-subtitle']",
       "[data-view-name*='search-result'] [class*='headline']",
-      "[data-medhunt-field='headline']",
+      "[data-radixsol-field='headline']",
     ]) {
       for (const element of card.querySelectorAll(selector)) {
         const candidate = usableResultHeadline(element.innerText || element.textContent, name, locationText);
@@ -962,7 +962,7 @@
 
   function reportScanProgress(profiles) {
     chrome.runtime.sendMessage({
-      type: "MEDHUNT_PLATFORM_SCAN_PROGRESS",
+      type: "RADIXSOL_PLATFORM_SCAN_PROGRESS",
       platform: PLATFORM.key,
       found: profiles.length,
       total: profiles.length,
@@ -1242,26 +1242,26 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const messageType = message?.type === ADAPTER_REQUEST ? message.original_type : message?.type;
     const respond = (payload) => sendResponse({ ...payload, adapter_revision: ADAPTER_REVISION });
-    if (messageType === "MEDHUNT_PLATFORM_PING") {
+    if (messageType === "RADIXSOL_PLATFORM_PING") {
       respond({ ok: true, platform: PLATFORM.key, label: PLATFORM.label, url: location.href });
       return false;
     }
-    if (messageType === "MEDHUNT_CAPTURE_PLATFORM_PROFILE") {
+    if (messageType === "RADIXSOL_CAPTURE_PLATFORM_PROFILE") {
       const result = snapshot();
       respond(result.ok ? { ...result, profile: result.profiles[0] } : result);
       return false;
     }
-    if (messageType === "MEDHUNT_LIST_PLATFORM_CANDIDATES") {
+    if (messageType === "RADIXSOL_LIST_PLATFORM_CANDIDATES") {
       const result = snapshot();
       respond(result);
       return false;
     }
-    if (messageType === "MEDHUNT_SCAN_PLATFORM_CANDIDATES") {
+    if (messageType === "RADIXSOL_SCAN_PLATFORM_CANDIDATES") {
       if (!resultPage()) {
         const result = snapshot();
         if (result.ok) {
           chrome.runtime.sendMessage({
-            type: "MEDHUNT_PLATFORM_SCAN_PROGRESS",
+            type: "RADIXSOL_PLATFORM_SCAN_PROGRESS",
             platform: PLATFORM.key,
             found: result.profiles.length,
             total: result.profiles.length,
@@ -1276,7 +1276,7 @@
       });
       return true;
     }
-    if (messageType === "MEDHUNT_OPEN_PLATFORM_CANDIDATE") {
+    if (messageType === "RADIXSOL_OPEN_PLATFORM_CANDIDATE") {
       if (resultPage()) respond(openCandidate(message.index));
       else {
         window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1284,11 +1284,11 @@
       }
       return false;
     }
-    if (messageType === "MEDHUNT_GUIDE_LINKEDIN_PDF") {
+    if (messageType === "RADIXSOL_GUIDE_LINKEDIN_PDF") {
       respond(guidePdfDownload());
       return false;
     }
-    if (messageType === "MEDHUNT_AUTO_LINKEDIN_PDF") {
+    if (messageType === "RADIXSOL_AUTO_LINKEDIN_PDF") {
       automaticPdfDownload().then(respond).catch((error) => {
         respond({ ok: false, error: String(error?.message || error) });
       });
@@ -1333,7 +1333,7 @@
     lastSignature = signature;
     try {
       chrome.runtime.sendMessage({
-        type: "MEDHUNT_PLATFORM_RESULTS_CHANGED",
+        type: "RADIXSOL_PLATFORM_RESULTS_CHANGED",
         platform: PLATFORM.key,
         view: state.view,
         result_page: state.resultPage,

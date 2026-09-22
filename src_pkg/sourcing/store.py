@@ -21,6 +21,21 @@ _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS users(
   id INTEGER PRIMARY KEY AUTOINCREMENT, auth0_sub TEXT UNIQUE NOT NULL,
   email TEXT DEFAULT '', name TEXT DEFAULT '', created REAL, updated REAL);
+CREATE TABLE IF NOT EXISTS extension_devices(
+  user_id TEXT PRIMARY KEY, installation_id TEXT NOT NULL,
+  bound_at REAL NOT NULL, last_seen REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS extension_device_registrations(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+  installation_id TEXT NOT NULL, device_name TEXT DEFAULT '',
+  user_agent TEXT DEFAULT '', status TEXT DEFAULT 'pending',
+  requested_at REAL NOT NULL, approved_at REAL DEFAULT 0,
+  approved_by TEXT DEFAULT '', last_seen REAL DEFAULT 0,
+  revoked_at REAL DEFAULT 0, revocation_reason TEXT DEFAULT '',
+  UNIQUE(user_id, installation_id));
+CREATE TABLE IF NOT EXISTS extension_device_events(
+  id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL,
+  installation_id TEXT DEFAULT '', event_type TEXT NOT NULL,
+  actor_user_id TEXT DEFAULT '', details TEXT DEFAULT '{}', created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS enrichment_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, auth0_sub TEXT NOT NULL,
   candidate_id INTEGER NOT NULL, status TEXT NOT NULL, provider TEXT DEFAULT '',
@@ -156,6 +171,10 @@ CREATE INDEX IF NOT EXISTS idx_sms_conversations_session
   ON sms_conversations(zoom_session_id);
 CREATE INDEX IF NOT EXISTS idx_sms_messages_conversation
   ON sms_messages(conversation_id, created);
+CREATE INDEX IF NOT EXISTS idx_extension_devices_user_status
+  ON extension_device_registrations(user_id, status, last_seen);
+CREATE INDEX IF NOT EXISTS idx_extension_device_events_user
+  ON extension_device_events(user_id, created);
 """
 
 _POSTGRES_SCHEMA = (
@@ -163,6 +182,25 @@ _POSTGRES_SCHEMA = (
          id BIGSERIAL PRIMARY KEY, auth0_sub TEXT UNIQUE NOT NULL,
          email TEXT DEFAULT '', name TEXT DEFAULT '', created DOUBLE PRECISION,
          updated DOUBLE PRECISION
+       )""",
+    """CREATE TABLE IF NOT EXISTS extension_devices(
+         user_id TEXT PRIMARY KEY, installation_id TEXT NOT NULL,
+         bound_at DOUBLE PRECISION NOT NULL, last_seen DOUBLE PRECISION NOT NULL
+       )""",
+    """CREATE TABLE IF NOT EXISTS extension_device_registrations(
+         id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL,
+         installation_id TEXT NOT NULL, device_name TEXT DEFAULT '',
+         user_agent TEXT DEFAULT '', status TEXT DEFAULT 'pending',
+         requested_at DOUBLE PRECISION NOT NULL,
+         approved_at DOUBLE PRECISION DEFAULT 0, approved_by TEXT DEFAULT '',
+         last_seen DOUBLE PRECISION DEFAULT 0, revoked_at DOUBLE PRECISION DEFAULT 0,
+         revocation_reason TEXT DEFAULT '', UNIQUE(user_id, installation_id)
+       )""",
+    """CREATE TABLE IF NOT EXISTS extension_device_events(
+         id BIGSERIAL PRIMARY KEY, user_id TEXT NOT NULL,
+         installation_id TEXT DEFAULT '', event_type TEXT NOT NULL,
+         actor_user_id TEXT DEFAULT '', details TEXT DEFAULT '{}',
+         created DOUBLE PRECISION NOT NULL
        )""",
     """CREATE TABLE IF NOT EXISTS enrichment_events(
          id BIGSERIAL PRIMARY KEY, auth0_sub TEXT NOT NULL,
@@ -367,6 +405,10 @@ _POSTGRES_SCHEMA = (
     "ON sms_conversations(zoom_session_id)",
     "CREATE INDEX IF NOT EXISTS idx_sms_messages_conversation "
     "ON sms_messages(conversation_id, created)",
+    "CREATE INDEX IF NOT EXISTS idx_extension_devices_user_status "
+    "ON extension_device_registrations(user_id, status, last_seen)",
+    "CREATE INDEX IF NOT EXISTS idx_extension_device_events_user "
+    "ON extension_device_events(user_id, created)",
 )
 
 _POSTGRES_SCHEMA_READY = False
@@ -387,7 +429,9 @@ _CANDIDATE_FIELDS = {
 # each time the local desktop backend starts.  The full idempotent schema below
 # still runs whenever a table, migration column, or required index is missing.
 _POSTGRES_REQUIRED_TABLES = (
-    "users", "enrichment_events", "jobs", "candidates", "outreach", "talent_pools", "talent_pool_members",
+    "users", "extension_devices", "extension_device_registrations",
+    "extension_device_events", "enrichment_events", "jobs", "candidates",
+    "outreach", "talent_pools", "talent_pool_members",
     "campaigns", "campaign_members", "dnc", "resumes", "resume_extractions",
     "provider_lookups", "lookup_runs", "lookup_run_items",
     "nexus_candidate_links", "resume_capture_locks", "nexus_deliveries",
@@ -428,6 +472,7 @@ _POSTGRES_REQUIRED_INDEXES = (
     "idx_watcher_email_delivery_status",
     "idx_sms_conversations_candidate", "idx_sms_conversations_session",
     "idx_sms_messages_conversation",
+    "idx_extension_devices_user_status", "idx_extension_device_events_user",
 )
 
 
@@ -3027,6 +3072,348 @@ def upsert_user(auth0_sub: str, *, email: str = "", name: str = "") -> dict:
                 (subject,),
             ).fetchone()
     return dict(row)
+
+
+def _device_event(connection, user_id: str, installation_id: str, event_type: str,
+                  *, actor_user_id: str = "", details: dict | None = None) -> None:
+    connection.execute(
+        """INSERT INTO extension_device_events(
+             user_id,installation_id,event_type,actor_user_id,details,created
+           ) VALUES(?,?,?,?,?,?)""",
+        (
+            user_id, installation_id, str(event_type or "unknown")[:80],
+            str(actor_user_id or "")[:255], json.dumps(details or {}), time.time(),
+        ),
+    )
+
+
+def _device_row(row, *, current_installation_id: str = "") -> dict | None:
+    if row is None:
+        return None
+    result = dict(row)
+    result["current"] = bool(
+        current_installation_id
+        and result.get("installation_id") == current_installation_id
+    )
+    # Installation identifiers are bearer-like local secrets. Only expose a
+    # short display suffix to account-management screens and logs.
+    installation_id = str(result.pop("installation_id", ""))
+    result["installation_suffix"] = installation_id[-6:] if installation_id else ""
+    return result
+
+
+def register_extension_device(user_id: str, installation_id: str, *,
+                              device_name: str = "", user_agent: str = "") -> dict:
+    """Register a device after a successful Healthcareboard email challenge.
+
+    The first device is approved automatically. Later devices stay pending
+    until an already-approved device for the same user or an administrator
+    approves them. A manually revoked installation never self-reactivates.
+    """
+    subject = str(user_id or "").strip()[:255]
+    device = str(installation_id or "").strip()[:100]
+    if not subject or not device:
+        raise ValueError("user_id and installation_id are required")
+    name = str(device_name or "Medhunt browser")[:200]
+    agent = str(user_agent or "")[:500]
+    now = time.time()
+    with _conn() as connection:
+        with connection.transaction():
+            # Transparently carry forward the strict 3.26.5 binding if that
+            # short-lived release was ever deployed before this workflow.
+            legacy = connection.execute(
+                "SELECT installation_id,bound_at,last_seen FROM extension_devices WHERE user_id=?",
+                (subject,),
+            ).fetchone()
+            existing_count = int(_scalar(connection.execute(
+                "SELECT COUNT(*) FROM extension_device_registrations WHERE user_id=?",
+                (subject,),
+            )) or 0)
+            if legacy and existing_count == 0:
+                legacy_data = dict(legacy)
+                connection.execute(
+                    """INSERT INTO extension_device_registrations(
+                         user_id,installation_id,device_name,user_agent,status,
+                         requested_at,approved_at,approved_by,last_seen
+                       ) VALUES(?,?,?,?,?,?,?,?,?)""",
+                    (
+                        subject, legacy_data["installation_id"], "Existing Medhunt installation",
+                        "", "approved", float(legacy_data.get("bound_at") or now),
+                        float(legacy_data.get("bound_at") or now), "migration",
+                        float(legacy_data.get("last_seen") or now),
+                    ),
+                )
+            row = connection.execute(
+                """SELECT * FROM extension_device_registrations
+                   WHERE user_id=? AND installation_id=?""",
+                (subject, device),
+            ).fetchone()
+            approved_count = int(_scalar(connection.execute(
+                """SELECT COUNT(*) FROM extension_device_registrations
+                   WHERE user_id=? AND status='approved'""",
+                (subject,),
+            )) or 0)
+            if row:
+                current = dict(row)
+                status = str(current.get("status") or "pending")
+                if status == "expired" and approved_count < config.MEDHUNT_MAX_REGISTERED_DEVICES:
+                    status = "approved"
+                    connection.execute(
+                        """UPDATE extension_device_registrations SET
+                             status='approved',device_name=?,user_agent=?,approved_at=?,
+                             approved_by=?,last_seen=?,revoked_at=0,revocation_reason=''
+                           WHERE id=?""",
+                        (name, agent, now, subject, now, current["id"]),
+                    )
+                    _device_event(
+                        connection, subject, device, "reauthorized",
+                        actor_user_id=subject,
+                    )
+                elif status == "revoked":
+                    # A fresh email-code challenge is required before a
+                    # revoked browser can ask for approval again. It cannot
+                    # regain access until an already-approved device/admin
+                    # reviews the new request.
+                    status = "pending"
+                    connection.execute(
+                        """UPDATE extension_device_registrations SET
+                             status='pending',device_name=?,user_agent=?,requested_at=?,
+                             approved_at=0,approved_by='',last_seen=?,revoked_at=0
+                           WHERE id=?""",
+                        (name, agent, now, now, current["id"]),
+                    )
+                    _device_event(
+                        connection, subject, device, "approval_requested_after_revoke",
+                        actor_user_id=subject,
+                    )
+                elif status != "revoked":
+                    connection.execute(
+                        """UPDATE extension_device_registrations
+                           SET device_name=?,user_agent=?,last_seen=? WHERE id=?""",
+                        (name, agent, now, current["id"]),
+                    )
+                row = connection.execute(
+                    "SELECT * FROM extension_device_registrations WHERE id=?",
+                    (current["id"],),
+                ).fetchone()
+                return _device_row(row, current_installation_id=device)
+
+            status = "approved" if approved_count == 0 else "pending"
+            approved_at = now if status == "approved" else 0
+            approved_by = subject if status == "approved" else ""
+            row = connection.execute(
+                """INSERT INTO extension_device_registrations(
+                     user_id,installation_id,device_name,user_agent,status,
+                     requested_at,approved_at,approved_by,last_seen
+                   ) VALUES(?,?,?,?,?,?,?,?,?) RETURNING *""",
+                (
+                    subject, device, name, agent, status, now, approved_at,
+                    approved_by, now,
+                ),
+            ).fetchone()
+            _device_event(
+                connection, subject, device,
+                "first_device_approved" if status == "approved" else "approval_requested",
+                actor_user_id=subject,
+            )
+    return _device_row(row, current_installation_id=device)
+
+
+def authorize_extension_device(user_id: str, installation_id: str) -> dict | None:
+    """Validate an approved installation and refresh its throttled heartbeat."""
+    subject = str(user_id or "").strip()[:255]
+    device = str(installation_id or "").strip()[:100]
+    if not subject or not device:
+        return None
+    now = time.time()
+    cutoff = now - (config.MEDHUNT_DEVICE_IDLE_DAYS * 86400)
+    with _conn() as connection:
+        with connection.transaction():
+            row = connection.execute(
+                """SELECT * FROM extension_device_registrations
+                   WHERE user_id=? AND installation_id=?""",
+                (subject, device),
+            ).fetchone()
+            if not row:
+                # Seamlessly migrate users who already had a valid Healthboard
+                # session before device registration shipped. Only the first
+                # installation can take this path; an account with any device
+                # history must complete email verification and approval.
+                registered_count = int(_scalar(connection.execute(
+                    "SELECT COUNT(*) FROM extension_device_registrations WHERE user_id=?",
+                    (subject,),
+                )) or 0)
+                if registered_count:
+                    return None
+                legacy = connection.execute(
+                    "SELECT installation_id,bound_at,last_seen FROM extension_devices WHERE user_id=?",
+                    (subject,),
+                ).fetchone()
+                legacy_data = dict(legacy) if legacy else {}
+                # If the previous strict binding exists, only that same
+                # installation may migrate silently. A different browser must
+                # complete email verification and enter the approval flow.
+                if legacy_data and legacy_data.get("installation_id") != device:
+                    return None
+                bound_at = float(legacy_data.get("bound_at") or now)
+                status = "approved"
+                requested_at = bound_at if legacy else now
+                row = connection.execute(
+                    """INSERT INTO extension_device_registrations(
+                         user_id,installation_id,device_name,user_agent,status,
+                         requested_at,approved_at,approved_by,last_seen
+                       ) VALUES(?,?,?,?,?,?,?,?,?) RETURNING *""",
+                    (
+                        subject, device,
+                        "Existing Medhunt installation" if legacy else "Existing signed-in installation",
+                        "", status, requested_at, bound_at, "migration",
+                        float(legacy_data.get("last_seen") or now),
+                    ),
+                ).fetchone()
+                connection.execute(
+                    """INSERT INTO extension_devices(user_id,installation_id,bound_at,last_seen)
+                       VALUES(?,?,?,?)
+                       ON CONFLICT(user_id) DO UPDATE SET
+                         installation_id=excluded.installation_id,
+                         last_seen=excluded.last_seen""",
+                    (subject, device, bound_at, now),
+                )
+                _device_event(
+                    connection, subject, device,
+                    "existing_installation_migrated" if legacy else "first_installation_registered",
+                    actor_user_id=subject,
+                )
+                data = dict(row)
+            data = dict(row)
+            if data.get("status") != "approved":
+                return _device_row(row, current_installation_id=device)
+            last_seen = float(data.get("last_seen") or 0)
+            if last_seen and last_seen < cutoff:
+                connection.execute(
+                    "UPDATE extension_device_registrations SET status='expired' WHERE id=?",
+                    (data["id"],),
+                )
+                _device_event(connection, subject, device, "expired")
+                data["status"] = "expired"
+                return _device_row(data, current_installation_id=device)
+            if last_seen < now - 300:
+                connection.execute(
+                    "UPDATE extension_device_registrations SET last_seen=? WHERE id=?",
+                    (now, data["id"]),
+                )
+                data["last_seen"] = now
+    return _device_row(data, current_installation_id=device)
+
+
+def extension_device_status(user_id: str, installation_id: str) -> dict | None:
+    subject = str(user_id or "").strip()[:255]
+    device = str(installation_id or "").strip()[:100]
+    with _conn() as connection:
+        row = connection.execute(
+            """SELECT * FROM extension_device_registrations
+               WHERE user_id=? AND installation_id=?""",
+            (subject, device),
+        ).fetchone()
+    return _device_row(row, current_installation_id=device)
+
+
+def list_extension_devices(user_id: str, *, current_installation_id: str = "",
+                           include_pending_for_all_users: bool = False) -> list[dict]:
+    subject = str(user_id or "").strip()[:255]
+    with _conn() as connection:
+        if include_pending_for_all_users:
+            rows = connection.execute(
+                """SELECT d.* FROM extension_device_registrations d
+                   WHERE d.user_id=? OR d.status IN ('pending','expired')
+                   ORDER BY CASE WHEN d.user_id=? THEN 0 ELSE 1 END,d.requested_at DESC
+                   LIMIT 200""",
+                (subject, subject),
+            ).fetchall()
+        else:
+            rows = connection.execute(
+                """SELECT d.* FROM extension_device_registrations d
+                   WHERE d.user_id=? ORDER BY d.requested_at DESC""",
+                (subject,),
+            ).fetchall()
+    return [
+        _device_row(row, current_installation_id=current_installation_id)
+        for row in rows
+    ]
+
+
+def approve_extension_device(device_id: int, *, actor_user_id: str,
+                             actor_is_admin: bool = False) -> dict:
+    actor = str(actor_user_id or "").strip()[:255]
+    with _conn() as connection:
+        with connection.transaction():
+            row = connection.execute(
+                "SELECT * FROM extension_device_registrations WHERE id=?",
+                (int(device_id),),
+            ).fetchone()
+            if not row:
+                raise LookupError("Device request not found")
+            target = dict(row)
+            if not actor_is_admin:
+                raise PermissionError("Only a Healthcareboard administrator can approve devices")
+            if target.get("status") == "revoked":
+                raise ValueError("A revoked device cannot be approved; request access again from a new installation")
+            approved_count = int(_scalar(connection.execute(
+                """SELECT COUNT(*) FROM extension_device_registrations
+                   WHERE user_id=? AND status='approved' AND id<>?""",
+                (target["user_id"], int(device_id)),
+            )) or 0)
+            if approved_count >= config.MEDHUNT_MAX_REGISTERED_DEVICES:
+                raise ValueError(
+                    f"This account already has {config.MEDHUNT_MAX_REGISTERED_DEVICES} approved devices"
+                )
+            now = time.time()
+            connection.execute(
+                """UPDATE extension_device_registrations SET
+                     status='approved',approved_at=?,approved_by=?,last_seen=?,
+                     revoked_at=0,revocation_reason='' WHERE id=?""",
+                (now, actor, now, int(device_id)),
+            )
+            _device_event(
+                connection, target["user_id"], target["installation_id"],
+                "approved", actor_user_id=actor,
+            )
+            row = connection.execute(
+                "SELECT * FROM extension_device_registrations WHERE id=?",
+                (int(device_id),),
+            ).fetchone()
+    return _device_row(row)
+
+
+def revoke_extension_device(device_id: int, *, actor_user_id: str,
+                            actor_is_admin: bool = False, reason: str = "") -> dict:
+    actor = str(actor_user_id or "").strip()[:255]
+    with _conn() as connection:
+        with connection.transaction():
+            row = connection.execute(
+                "SELECT * FROM extension_device_registrations WHERE id=?",
+                (int(device_id),),
+            ).fetchone()
+            if not row:
+                raise LookupError("Device not found")
+            target = dict(row)
+            if not actor_is_admin and target.get("user_id") != actor:
+                raise PermissionError("Device revocation is not permitted")
+            now = time.time()
+            connection.execute(
+                """UPDATE extension_device_registrations SET
+                     status='revoked',revoked_at=?,revocation_reason=? WHERE id=?""",
+                (now, str(reason or "Revoked by account owner")[:500], int(device_id)),
+            )
+            _device_event(
+                connection, target["user_id"], target["installation_id"],
+                "revoked", actor_user_id=actor,
+                details={"reason": str(reason or "")[:500]},
+            )
+            row = connection.execute(
+                "SELECT * FROM extension_device_registrations WHERE id=?",
+                (int(device_id),),
+            ).fetchone()
+    return _device_row(row)
 
 
 def record_enrichment_event(auth0_sub: str, candidate_id: int, status: str,

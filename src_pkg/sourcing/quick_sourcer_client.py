@@ -482,16 +482,81 @@ def apply_to_candidate(candidate_id: int, result: dict) -> dict:
     return public
 
 
-def lookup_candidate(candidate_id: int, refresh: bool = False) -> dict:
-    """Look one stored candidate up through Quick Sourcer and save the answer.
+def _stored_candidate_result(candidate: dict | None) -> dict | None:
+    """Rehydrate a previously accepted Quick Sourcer result from Neon.
 
-    An uncached search takes 30-90 seconds because the API drives a real
-    browser, so callers must run these one at a time rather than in parallel.
+    A candidate may be selected by several recruiters, or the extension panel
+    may be reopened after the first lookup.  In both cases the candidate row
+    is the durable source of the already accepted contact result.  Reusing it
+    here prevents a second paid/live Quick Sourcer search (the explicit
+    ``refresh`` path remains available for an intentional re-check).
+    """
+    source = candidate or {}
+    verification = source.get("verification") or {}
+    verification_source = str(verification.get("source") or "").strip().casefold()
+    emails = [
+        str(value).strip() for value in source.get("emails") or []
+        if str(value).strip()
+    ]
+    record = verification.get("record") or {}
+    phones = []
+    for row in record.get("phones") or []:
+        if isinstance(row, dict):
+            value = _text(row.get("value")) or _text(row.get("number"))
+            if value:
+                phones.append({**row, "value": value})
+    if not phones:
+        phones = [
+            {"value": _text(value), "type": ""}
+            for value in source.get("phones") or []
+            if _text(value)
+        ]
+    phones = [row for row in phones if _text(row.get("value"))]
+    if not emails and not phones:
+        return None
+    if verification_source != CONTACT_SOURCE:
+        # A prior PDL/Enformion result is already persisted on the candidate.
+        # Reuse only a currently valid successful row; otherwise this endpoint
+        # must perform its configured provider lookup as usual.
+        if str(source.get("enrich_status") or "").casefold() not in {
+            "success", "found",
+        }:
+            return None
+        try:
+            if float(source.get("contact_expires_at") or 0) <= time.time():
+                return None
+        except (TypeError, ValueError):
+            return None
+    return {
+        "status": "found",
+        "name": _text(record.get("name") or source.get("name")),
+        "source": _text(record.get("source_site") or verification_source or CONTACT_SOURCE),
+        "external_id": record.get("external_id"),
+        "emails": emails,
+        "phones": phones,
+        "addresses": list(source.get("addresses") or []),
+        "cached": True,
+    }
+
+
+def lookup_candidate(candidate_id: int, refresh: bool = False) -> dict:
+    """Return stored contacts first, then look up through Quick Sourcer.
+
+    A database hit avoids a duplicate provider call. An uncached search takes
+    30-90 seconds because the API drives a real browser, so callers must run
+    these one at a time rather than in parallel.
     """
     candidate = store.get_candidate(candidate_id)
     if not candidate:
         return {"status": "failed", "emails": [], "phones": [], "phone_contacts": [],
                 "resume_required": False, "location_match": None}
+    if not refresh:
+        stored = _stored_candidate_result(candidate)
+        if stored:
+            # Apply DNC filtering and return the same minimal browser contract
+            # as a live lookup, without rewriting the Neon row or calling the
+            # external provider.
+            return {**public_lookup_result(stored), "cached": True}
     name = person_name.normalize_person_name(candidate.get("name") or "") or str(
         candidate.get("name") or ""
     )

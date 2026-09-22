@@ -102,6 +102,12 @@ HEALTHBOARD_AUTH_TIMEOUT = max(
 HEALTHBOARD_AUTH_CACHE_SECONDS = max(
     0, min(300, int(os.getenv("HEALTHBOARD_AUTH_CACHE_SECONDS", "60")))
 )
+MEDHUNT_MAX_REGISTERED_DEVICES = max(
+    1, min(5, int(os.getenv("MEDHUNT_MAX_REGISTERED_DEVICES", "2")))
+)
+MEDHUNT_DEVICE_IDLE_DAYS = max(
+    7, min(365, int(os.getenv("MEDHUNT_DEVICE_IDLE_DAYS", "90")))
+)
 
 # Zoom Phone SMS is a server-side integration. Credentials are never shipped
 # in the browser extension. Sending remains disabled until every required

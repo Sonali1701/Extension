@@ -54,7 +54,7 @@ async def lifespan(_app: FastAPI):
         nexus_delivery.stop()
 
 
-APP_VERSION = "3.26.4"
+APP_VERSION = "3.26.6"
 
 app = FastAPI(
     title="Medhunt Sourcing Assistant",
@@ -74,13 +74,14 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
     allow_headers=[
         "Content-Type", "X-Medhunt-Token", "X-HealthBoard-Extension-Token",
+        "X-Medhunt-Device-ID",
     ],
 )
 
 
 _PUBLIC_LOCAL_PATHS = frozenset({
     "/", "/app.js", "/styles.css", "/privacy", "/health", "/auth/config",
-    "/auth/request-code", "/auth/verify-code",
+    "/auth/request-code", "/auth/verify-code", "/auth/device-status",
     "/integrations/zoom/webhook",
 })
 
@@ -147,8 +148,34 @@ async def authenticate_local_api_requests(request: Request, call_next):
             return JSONResponse({"detail": "Healthcareboard sign-in is required."}, status_code=401)
         try:
             identity = healthboard_auth.verify_extension_token(supplied)
+            subject = str(identity.get("user_id") or "")
+        except Exception:
+            return JSONResponse({"detail": "Invalid Healthcareboard extension session."}, status_code=401)
+        installation_id = request.headers.get("x-medhunt-device-id", "").strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", installation_id):
+            return JSONResponse(
+                {"detail": "This Medhunt installation is not registered. Update the extension and sign in again."},
+                status_code=403,
+            )
+        device = store.authorize_extension_device(subject, installation_id)
+        if not device:
+            return JSONResponse(
+                {"detail": "This Medhunt installation is not registered. Sign in to request access."},
+                status_code=403,
+            )
+        if device.get("status") != "approved":
+            messages = {
+                "pending": "This device is waiting for approval from a Healthcareboard administrator.",
+                "expired": "This device registration expired after extended inactivity. Sign in again to restore access.",
+                "revoked": "Access for this device was revoked. Contact your administrator if this was unexpected.",
+            }
+            return JSONResponse(
+                {"detail": messages.get(str(device.get("status")), "This device is not approved.")},
+                status_code=403,
+            )
+        try:
             request.state.user = {
-                "sub": str(identity.get("user_id") or ""),
+                "sub": subject,
                 "email": str(identity.get("email") or ""),
                 "role": str(identity.get("role") or ""),
             }
@@ -264,6 +291,12 @@ class HealthBoardCodeVerify(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     code: str = Field(pattern=r"^\d{6}$")
     challenge: str = Field(min_length=40, max_length=4096)
+    device_id: str = Field(pattern=r"^[A-Za-z0-9_-]{40,64}$")
+    device_name: str = Field(default="Medhunt browser", max_length=200)
+
+
+class DeviceRevokeIn(BaseModel):
+    reason: str = Field(default="", max_length=500)
 
 
 class PdlBatchEnrichIn(BaseModel):
@@ -540,7 +573,7 @@ def verify_healthboard_code(body: HealthBoardCodeVerify, request: Request):
     if not healthboard_auth.enabled():
         raise HTTPException(503, "Healthcareboard login is not configured.")
     try:
-        return healthboard_auth.verify_code(
+        verified = healthboard_auth.verify_code(
             body.email.strip().lower(), body.code, body.challenge,
             client_ip=_request_client_ip(request),
         )
@@ -549,6 +582,109 @@ def verify_healthboard_code(body: HealthBoardCodeVerify, request: Request):
             "Healthcareboard code verification was rejected (%s).", type(exc).__name__,
         )
         raise HTTPException(401, "Invalid or expired sign-in code.") from exc
+    identity = verified.get("user") or {}
+    subject = str(identity.get("user_id") or "")
+    if not subject:
+        raise HTTPException(502, "Healthcareboard did not return a valid user identity.")
+    store.upsert_user(
+        subject,
+        email=str(identity.get("email") or ""),
+        name=str(identity.get("name") or ""),
+    )
+    device = store.register_extension_device(
+        subject,
+        body.device_id,
+        device_name=body.device_name,
+        user_agent=request.headers.get("user-agent", ""),
+    )
+    verified = dict(verified)
+    verified["device"] = device
+    verified["device_approval_required"] = device.get("status") != "approved"
+    return verified
+
+
+def _admin_identity(user: dict) -> bool:
+    role = str(user.get("role") or "").strip().casefold().replace("-", "_")
+    return role in {"admin", "administrator", "super_admin", "owner"}
+
+
+@app.get("/auth/device-status")
+def auth_device_status(request: Request):
+    """Allow a pending installation to poll without granting API access."""
+    token = request.headers.get("x-healthboard-extension-token", "").strip()
+    installation_id = request.headers.get("x-medhunt-device-id", "").strip()
+    if not token or not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", installation_id):
+        raise HTTPException(401, "A valid Medhunt device session is required.")
+    try:
+        identity = healthboard_auth.verify_extension_token(token)
+    except Exception as exc:
+        raise HTTPException(401, "Invalid Healthcareboard extension session.") from exc
+    subject = str(identity.get("user_id") or "")
+    device = store.extension_device_status(subject, installation_id)
+    if not device:
+        raise HTTPException(404, "This device request no longer exists.")
+    return {
+        "device": device,
+        "approved": device.get("status") == "approved",
+        "user": {
+            "user_id": subject,
+            "email": str(identity.get("email") or ""),
+            "name": str(identity.get("name") or ""),
+            "role": str(identity.get("role") or ""),
+        },
+    }
+
+
+@app.get("/auth/devices")
+def auth_devices(request: Request):
+    user = _request_user(request)
+    subject = str(user.get("sub") or "")
+    current = request.headers.get("x-medhunt-device-id", "").strip()
+    devices = store.list_extension_devices(
+        subject,
+        current_installation_id=current,
+        include_pending_for_all_users=_admin_identity(user),
+    )
+    return {
+        "items": devices,
+        "max_approved_devices": config.MEDHUNT_MAX_REGISTERED_DEVICES,
+        "is_admin": _admin_identity(user),
+    }
+
+
+@app.post("/auth/devices/{device_id}/approve")
+def approve_auth_device(device_id: int, request: Request):
+    user = _request_user(request)
+    try:
+        device = store.approve_extension_device(
+            device_id,
+            actor_user_id=str(user.get("sub") or ""),
+            actor_is_admin=_admin_identity(user),
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    return {"device": device}
+
+
+@app.post("/auth/devices/{device_id}/revoke")
+def revoke_auth_device(device_id: int, body: DeviceRevokeIn, request: Request):
+    user = _request_user(request)
+    try:
+        device = store.revoke_extension_device(
+            device_id,
+            actor_user_id=str(user.get("sub") or ""),
+            actor_is_admin=_admin_identity(user),
+            reason=body.reason,
+        )
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(403, str(exc)) from exc
+    return {"device": device}
 
 
 @app.get("/auth/me")
@@ -838,8 +974,7 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes):
     nexus_contact_ready = bool(
         config.NEXUS_SYNC_ENABLED
         and contactable.get("contacts_trusted") is True
-        and contactable.get("phones")
-        and contactable.get("emails")
+        and (contactable.get("phones") or contactable.get("emails"))
     )
     data, contact_sheet_embedded = resume_enrichment.add_contact_sheet(
         data, contact_sheet_candidate,
@@ -1729,6 +1864,11 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
             lambda host, path: host == "providers.sharecare.com"
             and bool(re.match(r"^/doctor/[^/]+/?$", path, re.IGNORECASE)),
             "Sharecare",
+        ),
+        "webmd": (
+            lambda host, path: host == "doctor.webmd.com"
+            and bool(re.match(r"^/doctor/[^/]+-overview/?$", path, re.IGNORECASE)),
+            "WebMD",
         ),
     }
     rule = source_rules.get(candidate_source)

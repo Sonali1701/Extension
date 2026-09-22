@@ -4,8 +4,8 @@
 
 (() => {
   "use strict";
-  if (window.__medhuntResumeHookLoaded) return;
-  window.__medhuntResumeHookLoaded = true;
+  if (window.__radixsolResumeHookLoaded) return;
+  window.__radixsolResumeHookLoaded = true;
 
   const RESUME_TYPE = /(pdf|officedocument|msword|wordprocessing|octet-stream)/i;
 
@@ -21,7 +21,7 @@
         );
       }
       window.postMessage({
-        __medhuntResume: true,
+        __radixsolResume: true,
         base64: btoa(binary),
         contentType: contentType || "",
         tentative: Boolean(tentative),
@@ -32,7 +32,7 @@
   }
 
   const originalCreateObjectURL = URL.createObjectURL.bind(URL);
-  URL.createObjectURL = function medhuntCreateObjectURL(value) {
+  URL.createObjectURL = function radixsolCreateObjectURL(value) {
     try {
       if (value instanceof Blob) {
         const definite = RESUME_TYPE.test(value.type || "");
@@ -44,7 +44,7 @@
 
   const originalFetch = window.fetch;
   if (originalFetch) {
-    window.fetch = function medhuntFetch() {
+    window.fetch = function radixsolFetch() {
       return originalFetch.apply(this, arguments).then((response) => {
         try {
           const contentType = response.headers.get("content-type") || "";
@@ -59,7 +59,7 @@
 
   const OriginalXMLHttpRequest = window.XMLHttpRequest;
   if (OriginalXMLHttpRequest) {
-    const WrappedXMLHttpRequest = function medhuntXMLHttpRequest() {
+    const WrappedXMLHttpRequest = function radixsolXMLHttpRequest() {
       const request = new OriginalXMLHttpRequest();
       request.addEventListener("load", function captureXHRResume() {
         try {
