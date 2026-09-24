@@ -139,6 +139,13 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   font-size: 11px;
 }
 .auth-button { margin-left: 6px; min-width: 52px; }
+.logout-button {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+}
+.logout-button:hover { color: var(--red); background: var(--redbg); }
 
 .wrap { width: 100%; max-width: 1180px; padding: 22px 24px; }
 .card {

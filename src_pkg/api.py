@@ -24,14 +24,14 @@ from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, Response
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel, Field
 
 from sourcing import (
     store, intake, ranking, outreach, config, storage,
     resume_enrichment, contact_access,
     person_name, phone_policy, quick_sourcer_client,
-    nexus_delivery, resume_extraction, watcher_notifications, healthboard_auth,
+    nexus_delivery, watcher_notifications, healthboard_auth,
     profile_resume, zoom_sms, analytics_delivery,
 )
 
@@ -140,6 +140,14 @@ async def authenticate_local_api_requests(request: Request, call_next):
             )
     request.state.user = None
     request.state.healthboard_extension_token = ""
+    if request.url.path.startswith("/internal/halo/"):
+        supplied = request.headers.get("x-medhunt-service-token", "")
+        if not config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN or not hmac.compare_digest(
+            supplied, config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN
+        ):
+            return JSONResponse({"detail": "Invalid Halo service token."}, status_code=401)
+        request.state.halo_service = True
+        return await call_next(request)
     if (
         healthboard_auth.enabled()
         and request.method.upper() != "OPTIONS"
@@ -208,7 +216,6 @@ def _request_user(request: Request | None) -> dict:
 
 _RESOURCE_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 _FRONTEND_DIR = _RESOURCE_ROOT / "frontend"
-_FRONTEND = _FRONTEND_DIR / "index.html"
 
 
 class JobIn(BaseModel):
@@ -495,9 +502,7 @@ def _public_resume(resume: dict | None) -> dict:
 
 @app.get("/", response_class=HTMLResponse)
 def home():
-    if _FRONTEND.exists():
-        return FileResponse(str(_FRONTEND))
-    return HTMLResponse("<h1>Medhunt Sourcing Assistant API</h1>")
+    return RedirectResponse(config.MEDHUNT_MAIN_WEBSITE_URL, status_code=302)
 
 
 @app.get("/styles.css", include_in_schema=False)
@@ -606,13 +611,36 @@ def verify_healthboard_code(body: HealthBoardCodeVerify, request: Request):
 
 
 def _admin_identity(user: dict) -> bool:
-    role = str(user.get("role") or "").strip().casefold().replace("-", "_")
-    return role in {"admin", "administrator", "super_admin", "owner"}
+    role = re.sub(r"[\s-]+", "_", str(user.get("role") or "").strip().casefold())
+    email = str(user.get("email") or "").strip().casefold()
+    return role in {
+        "admin", "administrator", "super_admin", "owner",
+        "org_admin", "orgadmin", "org_administrator",
+        "organization_admin", "organizationadmin", "organization_administrator",
+        "medhunt_admin", "medhuntadmin", "medhunt_administrator",
+        "platform_admin", "platformadmin", "platform_administrator",
+    } or email in config.MEDHUNT_ADMIN_EMAILS
+
+
+def _messaging_manager_identity(user: dict) -> bool:
+    """Whether the signed-in user may triage and assign team conversations.
+
+    HealthBoard deployments use a few equivalent labels for recruiting/team
+    managers. Keep this allowlist explicit so an ordinary recruiter cannot see
+    another user's unassigned candidate replies or reassign their work.
+    """
+    if _admin_identity(user):
+        return True
+    role = re.sub(r"[\s-]+", "_", str(user.get("role") or "").strip().casefold())
+    return role in {
+        "manager", "recruiting_manager", "recruiter_manager",
+        "team_manager", "talent_manager",
+    }
 
 
 @app.get("/auth/device-status")
 def auth_device_status(request: Request):
-    """Allow a pending installation to poll without granting API access."""
+    """Allow a signed-in pending installation to finish auto-approval."""
     token = request.headers.get("x-healthboard-extension-token", "").strip()
     installation_id = request.headers.get("x-medhunt-device-id", "").strip()
     if not token or not re.fullmatch(r"[A-Za-z0-9_-]{40,64}", installation_id):
@@ -622,7 +650,7 @@ def auth_device_status(request: Request):
     except Exception as exc:
         raise HTTPException(401, "Invalid Healthcareboard extension session.") from exc
     subject = str(identity.get("user_id") or "")
-    device = store.extension_device_status(subject, installation_id)
+    device = store.auto_approve_pending_extension_device(subject, installation_id)
     if not device:
         raise HTTPException(404, "This device request no longer exists.")
     return {
@@ -645,31 +673,37 @@ def auth_devices(request: Request):
     devices = store.list_extension_devices(
         subject,
         current_installation_id=current,
-        include_pending_for_all_users=_admin_identity(user),
+        include_all_users=False,
     )
+    multi_device_accounts = []
+    if _admin_identity(user):
+        owners = {}
+        for device in devices:
+            owner_id = str(device.get("user_id") or "")
+            entry = owners.setdefault(owner_id, {
+                "user_id": owner_id,
+                "email": str(device.get("user_email") or ""),
+                "name": str(device.get("user_name") or ""),
+                "device_count": int(device.get("approved_device_count") or 0),
+            })
+            entry["device_count"] = int(
+                device.get("approved_device_count") or entry["device_count"]
+            )
+        multi_device_accounts = [
+            account for account in owners.values()
+            if account["device_count"] > 1
+        ]
     return {
         "items": devices,
-        "max_approved_devices": config.MEDHUNT_MAX_REGISTERED_DEVICES,
+        "multi_device_accounts": multi_device_accounts,
         "is_admin": _admin_identity(user),
     }
 
 
 @app.post("/auth/devices/{device_id}/approve")
 def approve_auth_device(device_id: int, request: Request):
-    user = _request_user(request)
-    try:
-        device = store.approve_extension_device(
-            device_id,
-            actor_user_id=str(user.get("sub") or ""),
-            actor_is_admin=_admin_identity(user),
-        )
-    except LookupError as exc:
-        raise HTTPException(404, str(exc)) from exc
-    except PermissionError as exc:
-        raise HTTPException(403, str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    return {"device": device}
+    _request_user(request)
+    raise HTTPException(410, "Approve extension devices from the Halo admin website.")
 
 
 @app.post("/auth/devices/{device_id}/revoke")
@@ -687,6 +721,99 @@ def revoke_auth_device(device_id: int, body: DeviceRevokeIn, request: Request):
     except PermissionError as exc:
         raise HTTPException(403, str(exc)) from exc
     return {"device": device}
+
+
+class HaloScopeIn(BaseModel):
+    user_ids: list[str] = Field(default_factory=list, max_length=1000)
+    all_users: bool = False
+
+
+class HaloDeviceActionIn(HaloScopeIn):
+    actor_user_id: str = Field(min_length=1, max_length=80)
+
+
+class HaloConversationAssignmentIn(HaloScopeIn):
+    actor_user_id: str = Field(min_length=1, max_length=80)
+    recruiter_user_id: str = Field(min_length=1, max_length=80)
+    recruiter_email: str = Field(default="", max_length=320)
+    recruiter_name: str = Field(default="", max_length=320)
+
+
+def _halo_scoped(record: dict, scope: HaloScopeIn, *, conversation: bool = False) -> bool:
+    if scope.all_users:
+        return True
+    users = set(scope.user_ids)
+    if conversation:
+        return bool({
+            str(record.get("initiated_by") or ""),
+            str(record.get("assigned_recruiter_id") or ""),
+        } & users)
+    return str(record.get("user_id") or "") in users
+
+
+@app.post("/internal/halo/devices")
+def halo_devices(scope: HaloScopeIn):
+    devices = store.list_extension_devices("", include_all_users=True)
+    items = [device for device in devices if _halo_scoped(device, scope)]
+    multiple = {}
+    for device in items:
+        if device.get("approved_device_count", 0) > 1:
+            multiple[device["user_id"]] = {
+                "user_id": device["user_id"],
+                "email": device.get("user_email"),
+                "device_count": device["approved_device_count"],
+            }
+    return {"items": items, "multi_device_accounts": list(multiple.values())}
+
+
+@app.post("/internal/halo/devices/{device_id}/approve")
+def halo_approve_device(device_id: int, body: HaloDeviceActionIn):
+    devices = store.list_extension_devices("", include_all_users=True)
+    target = next((item for item in devices if item["id"] == device_id), None)
+    if not target:
+        raise HTTPException(404, "Device request not found.")
+    if not _halo_scoped(target, body):
+        raise HTTPException(403, "Device is outside your organization.")
+    try:
+        return {"device": store.approve_extension_device(
+            device_id, actor_user_id=body.actor_user_id, actor_is_admin=True,
+        )}
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.post("/internal/halo/conversations")
+def halo_conversations(scope: HaloScopeIn):
+    items = store.list_sms_conversations(include_all=True)
+    return {"items": [item for item in items if _halo_scoped(item, scope, conversation=True)]}
+
+
+@app.post("/internal/halo/conversations/{conversation_id}")
+def halo_conversation(conversation_id: int, scope: HaloScopeIn):
+    item = store.get_sms_conversation(conversation_id)
+    if not item:
+        raise HTTPException(404, "Conversation not found.")
+    if not _halo_scoped(item, scope, conversation=True):
+        raise HTTPException(403, "Conversation is outside your organization.")
+    return item
+
+
+@app.post("/internal/halo/conversations/{conversation_id}/assign")
+def halo_assign_conversation(conversation_id: int, body: HaloConversationAssignmentIn):
+    item = store.get_sms_conversation(conversation_id)
+    if not item:
+        raise HTTPException(404, "Conversation not found.")
+    if not _halo_scoped(item, body, conversation=True):
+        raise HTTPException(403, "Conversation is outside your organization.")
+    if not any(message.get("direction") == "inbound" for message in item["messages"]):
+        raise HTTPException(409, "Wait for a candidate reply before assigning.")
+    updated = store.update_sms_conversation(
+        conversation_id, status="assigned",
+        assigned_recruiter_id=body.recruiter_user_id,
+        assigned_recruiter_email=body.recruiter_email,
+        assigned_recruiter_name=body.recruiter_name,
+    )
+    return {"conversation": updated}
 
 
 @app.get("/auth/me")
@@ -961,11 +1088,14 @@ def _store_resume_pdf(cid: int, filename: str, data: bytes):
     if not candidate:
         raise HTTPException(404, "candidate not found")
     contactable = contact_access.project_candidate(candidate)
-    # Read the original PDF before the Medhunt contact page is prepended. Text
-    # PDFs stay local and fast; only sparse/image-only pages invoke local OCR.
-    # Extraction failure is fail-open for capture and fail-closed for identity:
-    # no low-confidence value can replace captured platform data.
-    extraction = resume_extraction.extract(data, candidate)
+    # Strip any previous Medhunt cover before reprocessing, then attach one
+    # cover for this candidate. Resume contents are supplied by the source site.
+    try:
+        data, extraction, _resume_name = resume_enrichment.prepare_candidate_resume(
+            data, candidate,
+        )
+    except resume_enrichment.ContactSheetRefreshError as exc:
+        raise HTTPException(409, str(exc)) from exc
     accepted_resume_fields = extraction.get("accepted") or {}
     contact_sheet_candidate = dict(contactable)
     if isinstance(accepted_resume_fields, dict):
@@ -1047,8 +1177,15 @@ def authenticated_session():
 
 @app.post("/candidates/{cid}/resume/from-download")
 def attach_downloaded_resume(cid: int, body: ResumeDownloadIn):
-    if not store.get_candidate(cid):
+    candidate = store.get_candidate(cid)
+    if not candidate:
         raise HTTPException(404, "candidate not found")
+    contactable = contact_access.project_candidate(candidate)
+    if not (
+        contactable.get("contacts_trusted") is True
+        and (contactable.get("phones") or contactable.get("emails"))
+    ):
+        raise HTTPException(409, "A verified candidate phone or email is required before saving a downloaded resume.")
     try:
         path = Path(body.path).resolve(strict=True)
     except (OSError, RuntimeError):
@@ -1122,7 +1259,20 @@ def get_resume(cid: int, resume_id: int):
             raise HTTPException(502, f"Stored resume could not be retrieved: {exc}")
     if not data:
         raise HTTPException(404, "resume file is unavailable")
-    current = contact_access.project_candidate(store.get_candidate(cid))
+    candidate = store.get_candidate(cid)
+    if not candidate:
+        raise HTTPException(404, "candidate not found")
+    extraction_row = store.get_resume_extraction(resume_id, cid)
+    try:
+        _original, extraction, _resume_name = resume_enrichment.prepare_candidate_resume(
+            data, candidate,
+            extraction_row.get("extraction") if extraction_row else None,
+        )
+    except resume_enrichment.ContactSheetRefreshError as exc:
+        raise HTTPException(409, f"Stored resume could not be prepared: {exc}") from exc
+    if not extraction_row or extraction_row.get("extraction") != extraction:
+        store.save_resume_extraction(resume_id, cid, extraction)
+    current = contact_access.project_candidate(candidate)
     try:
         data, _ = resume_enrichment.refresh_contact_sheet(data, current)
     except resume_enrichment.ContactSheetRefreshError as exc:
@@ -1477,15 +1627,20 @@ def sms_consent(candidate_id: int, phone: str, request: Request):
         raise HTTPException(404, "Candidate not found.")
     verified_phone = _candidate_sms_phone(candidate, phone)
     consent = store.get_sms_consent(candidate_id, verified_phone)
+    phone_control = store.get_sms_phone_control(verified_phone)
+    phone_consent = store.get_sms_phone_consent(verified_phone)
+    if (store.is_dnc(verified_phone)
+            or (phone_consent and phone_consent.get("status") == "opted_out")):
+        phone_control = {**(phone_control or {}), "state": "opted_out"}
     conversation = store.find_sms_conversation(phone=verified_phone)
-    if conversation and int(conversation.get("candidate_id") or 0) != int(candidate_id):
-        conversation = None
     return {
         "consent": consent,
+        "phone_consent": phone_consent,
+        "phone_control": phone_control,
         "phone": verified_phone,
         "test_mode_bypass": _sms_test_bypass(verified_phone),
         "opt_in_pending": bool(
-            conversation and conversation.get("status") == "awaiting_opt_in"
+            phone_control and phone_control.get("state") in {"sending", "pending"}
         ),
     }
 
@@ -1522,20 +1677,38 @@ def request_sms_opt_in(body: SmsOptInRequestIn, request: Request):
     if not candidate:
         raise HTTPException(404, "Candidate not found.")
     phone = _candidate_sms_phone(candidate, body.phone)
-    if store.is_dnc(phone):
+    phone_control = store.get_sms_phone_control(phone)
+    phone_consent = store.get_sms_phone_consent(phone)
+    if (store.is_dnc(phone)
+            or (phone_control and phone_control.get("state") == "opted_out")
+            or (phone_consent and phone_consent.get("status") == "opted_out")):
         raise HTTPException(409, "This number has opted out and cannot be messaged.")
-    consent = store.get_sms_consent(body.candidate_id, phone)
-    if consent and consent.get("status") == "opted_in":
-        return {"already_opted_in": True, "consent": consent}
-    current = store.find_sms_conversation(phone=phone)
-    if (
-        current
-        and int(current.get("candidate_id") or 0) == int(body.candidate_id)
-        and current.get("status") == "awaiting_opt_in"
-    ):
+    if phone_control and phone_control.get("state") == "opted_in":
+        consent = store.get_sms_consent(body.candidate_id, phone)
+        return {"already_opted_in": True, "consent": consent,
+                "phone_control": phone_control}
+    if phone_consent and phone_consent.get("status") == "opted_in":
+        return {"already_opted_in": True, "consent": phone_consent,
+                "phone_control": phone_control}
+    request_id = body.request_id.strip() or uuid.uuid4().hex
+    claim = store.claim_sms_opt_in(
+        phone, body.candidate_id,
+        candidate_name=str(candidate.get("name") or ""),
+        initiated_by=str(user.get("sub") or ""),
+        sender_number=config.ZOOM_SMS_SENDER_NUMBER,
+        request_id=request_id,
+    )
+    if not claim["created"]:
+        state = str((claim.get("control") or {}).get("state") or "sending")
+        if state == "opted_out" or store.is_dnc(phone):
+            raise HTTPException(409, "This number has opted out and cannot be messaged.")
         return {
-            "already_pending": True,
-            "conversation": store.get_sms_conversation(current["id"]),
+            "already_sent": state in {"pending", "opted_in"},
+            "already_pending": state in {"sending", "pending"},
+            "state": state,
+            "conversation": store.get_sms_conversation(
+                (claim.get("control") or {}).get("conversation_id")
+            ) if (claim.get("control") or {}).get("conversation_id") else None,
         }
     first_name = str(candidate.get("name") or "there").strip().split()[0] or "there"
     text = (
@@ -1544,17 +1717,13 @@ def request_sms_opt_in(body: SmsOptInRequestIn, request: Request):
         "in to SMS messages from ABC Recruiting. Msg & data rates may apply. "
         "Reply STOP to opt out, HELP for help."
     )
-    conversation = store.get_or_create_sms_conversation(
-        body.candidate_id, phone,
-        candidate_name=str(candidate.get("name") or ""),
-        initiated_by=str(user.get("sub") or ""),
-        sender_number=config.ZOOM_SMS_SENDER_NUMBER,
-    )
-    request_id = body.request_id.strip() or uuid.uuid4().hex
+    conversation = claim["conversation"]
+    message_request_id = f"optin:{store.contact_key(phone)}:{request_id}"
     message, created = store.create_sms_message(
-        conversation["id"], "outbound", text, request_id=request_id,
+        conversation["id"], "outbound", text, request_id=message_request_id,
     )
     if not created:
+        store.update_sms_phone_control(phone, "pending")
         return {
             "conversation": store.get_sms_conversation(conversation["id"]),
             "message": message,
@@ -1570,8 +1739,10 @@ def request_sms_opt_in(body: SmsOptInRequestIn, request: Request):
         if session_id:
             changes["zoom_session_id"] = session_id
         conversation = store.update_sms_conversation(conversation["id"], **changes)
+        store.update_sms_phone_control(phone, "pending")
     except zoom_sms.ZoomSmsError as exc:
         store.update_sms_message(message["id"], status="failed", failure_reason=str(exc))
+        store.update_sms_phone_control(phone, "failed")
         raise HTTPException(502, str(exc)) from exc
     return {
         "conversation": store.get_sms_conversation(conversation["id"]),
@@ -1589,10 +1760,17 @@ def send_sms(body: SmsSendIn, request: Request):
         raise HTTPException(404, "Candidate not found.")
     phone = _candidate_sms_phone(candidate, body.phone)
     consent = store.get_sms_consent(body.candidate_id, phone)
+    phone_control = store.get_sms_phone_control(phone)
+    phone_consent = store.get_sms_phone_consent(phone)
     test_bypass = _sms_test_bypass(phone)
-    if (not consent or consent.get("status") != "opted_in") and not test_bypass:
+    if (not (consent and consent.get("status") == "opted_in")
+            and not (phone_control and phone_control.get("state") == "opted_in")
+            and not (phone_consent and phone_consent.get("status") == "opted_in")
+            and not test_bypass):
         raise HTTPException(409, "Documented SMS permission is required before sending.")
-    if store.is_dnc(phone):
+    if (store.is_dnc(phone)
+            or (phone_control and phone_control.get("state") == "opted_out")
+            or (phone_consent and phone_consent.get("status") == "opted_out")):
         raise HTTPException(409, "This number has opted out and cannot be messaged.")
     text = body.message.strip()
     if "reply stop" not in text.casefold():
@@ -1639,7 +1817,10 @@ def send_sms(body: SmsSendIn, request: Request):
 @app.get("/messaging/conversations")
 def conversations(request: Request):
     user = _request_user(request)
-    return {"items": store.list_sms_conversations(str(user.get("sub") or ""))}
+    return {"items": store.list_sms_conversations(
+        str(user.get("sub") or ""),
+        include_all=_messaging_manager_identity(user),
+    )}
 
 
 @app.get("/messaging/conversations/{conversation_id}")
@@ -1648,7 +1829,7 @@ def conversation(conversation_id: int, request: Request):
     result = store.get_sms_conversation(conversation_id)
     if not result:
         raise HTTPException(404, "Conversation not found.")
-    if str(user.get("role") or "").casefold() not in {"admin", "owner", "super_admin"} and str(user.get("sub")) not in {
+    if not _messaging_manager_identity(user) and str(user.get("sub")) not in {
         str(result.get("initiated_by") or ""), str(result.get("assigned_recruiter_id") or ""),
     }:
         raise HTTPException(403, "Conversation access denied.")
@@ -1671,24 +1852,7 @@ def messaging_recruiters(request: Request):
 @app.post("/messaging/conversations/{conversation_id}/assign")
 def assign_conversation(conversation_id: int, body: SmsAssignIn, request: Request):
     _request_user(request)
-    current = store.get_sms_conversation(conversation_id)
-    if not current:
-        raise HTTPException(404, "Conversation not found.")
-    token = getattr(request.state, "healthboard_extension_token", "")
-    try:
-        assigned = healthboard_auth.assign_conversation(
-            token, conversation=current, recruiter_user_id=body.recruiter_user_id,
-        )
-    except Exception as exc:
-        raise HTTPException(502, "Healthboard could not assign this conversation.") from exc
-    result = store.update_sms_conversation(
-        conversation_id,
-        status="assigned",
-        assigned_recruiter_id=str(assigned.get("user_id") or body.recruiter_user_id),
-        assigned_recruiter_email=str(assigned.get("email") or ""),
-        assigned_recruiter_name=str(assigned.get("name") or ""),
-    )
-    return {"conversation": result, "assignment": assigned}
+    raise HTTPException(410, "Assign candidate replies from the Halo website.")
 
 
 @app.post("/integrations/zoom/webhook")
@@ -1721,34 +1885,42 @@ async def zoom_webhook(request: Request):
     lookup_phone = sender_phone if event_type == "phone.sms_received" else recipient_phone
     current = store.find_sms_conversation(session_id=session_id, phone=lookup_phone)
     if not current:
+        store.complete_sms_webhook(event_key)
         return {"received": True, "matched": False}
     if session_id and not current.get("zoom_session_id"):
         current = store.update_sms_conversation(current["id"], zoom_session_id=session_id)
     if event_type == "phone.sms_received":
         text = str(obj.get("message") or "")
         store.create_sms_message(current["id"], "inbound", text, request_id=event_key, status="received")
-        keyword = text.strip().casefold()
+        tokens = re.findall(r"[a-z]+", text.casefold())
+        keyword = tokens[0] if tokens else ""
+        stop_reply = any(token in {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}
+                         for token in tokens)
+        start_reply = keyword in {"start", "yes", "unstop"}
+        help_reply = keyword in {"help", "info"}
+        was_opted_out = store.is_dnc(current["candidate_phone"]) or current.get("status") == "opted_out"
         reply_status = (
             "awaiting_opt_in"
-            if current.get("status") == "awaiting_opt_in" and keyword in {"help", "info"}
+            if current.get("status") == "awaiting_opt_in" and help_reply
+            else "opted_out" if was_opted_out and not start_reply
             else "replied"
         )
         current = store.update_sms_conversation(current["id"], status=reply_status)
         store.set_stage(int(current["candidate_id"]), "replied")
-        if keyword in {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}:
+        if stop_reply:
             store.record_sms_consent(
                 int(current["candidate_id"]), current["candidate_phone"], "opted_out",
                 "inbound_sms", f"Zoom webhook {event_key}", captured_by="zoom",
             )
             current = store.update_sms_conversation(current["id"], status="opted_out")
-        elif keyword in {"start", "yes", "unstop"}:
+        elif start_reply:
             store.record_sms_consent(
                 int(current["candidate_id"]), current["candidate_phone"], "opted_in",
                 "inbound_sms", f"Zoom opt-in reply {event_key}", captured_by="zoom",
                 disclosure_version="medhunt-sms-opt-in-v1",
             )
             current = store.update_sms_conversation(current["id"], status="open")
-        elif keyword in {"help", "info"}:
+        elif help_reply and not was_opted_out:
             help_text = (
                 "Radixsol Recruiting: Reply START to opt in to SMS about job "
                 "opportunities, or STOP to opt out. Msg & data rates may apply."
@@ -1772,12 +1944,15 @@ async def zoom_webhook(request: Request):
                         "SMS HELP response failed (%s).", type(exc).__name__,
                     )
         try:
-            healthboard_auth.report_message_event(
+            delivered = healthboard_auth.report_message_event(
                 event_id=event_key, conversation=current, event_type="received",
                 message_preview=text,
             )
+            if not delivered:
+                raise HTTPException(503, "Halo reply reporting is not configured; webhook will be retried.")
         except Exception:
             logging.getLogger("medhunt.healthboard").exception("Reply reporting failed")
+            raise HTTPException(503, "Could not deliver the candidate reply to Halo; webhook will be retried.")
     elif event_type in {"phone.sms_sent", "phone.sms_sent_failed"}:
         failed = bool(obj.get("failure_reason")) or event_type.endswith("failed")
         store.reconcile_outbound_sms(
@@ -1792,6 +1967,7 @@ async def zoom_webhook(request: Request):
                 "inbound_sms", f"Zoom campaign opt-out {event_key}", captured_by="zoom",
             )
             current = store.update_sms_conversation(current["id"], status="opted_out")
+    store.complete_sms_webhook(event_key)
     return {"received": True, "matched": True}
 
 # ---- ranking ----
@@ -1908,6 +2084,12 @@ def build_professional_profile_resume(cid: int, body: ProfessionalProfileResumeI
         or not rule[0]((source.hostname or "").casefold(), source.path)
     ):
         raise HTTPException(400, f"A valid {rule[1]} provider profile URL is required.")
+    contactable = contact_access.project_candidate(candidate)
+    if not (
+        contactable.get("contacts_trusted") is True
+        and (contactable.get("phones") or contactable.get("emails"))
+    ):
+        raise HTTPException(409, "A verified candidate phone or email is required before generating a resume.")
     profile = body.model_dump()
     if not any((
         profile["education"], profile["certifications"], profile["licenses"],

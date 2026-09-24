@@ -181,10 +181,29 @@ def process_once() -> dict | None:
                 operation="local_storage",
                 code="local_record_missing",
             )
+        source_pdf = _resume_bytes(resume)
+        extraction_row = store.get_resume_extraction(
+            int(resume["id"]), int(candidate["id"]),
+        )
+        try:
+            source_pdf, extraction, _resume_name = resume_enrichment.prepare_candidate_resume(
+                source_pdf, candidate,
+                extraction_row.get("extraction") if extraction_row else None,
+            )
+        except resume_enrichment.ContactSheetRefreshError as exc:
+            raise nexus_sync.NexusPermanentError(
+                "Stored contact page could not be removed safely.",
+                operation="payload_validation",
+                code="resume_contact_refresh_failed",
+            ) from exc
+        if not extraction_row or extraction_row.get("extraction") != extraction:
+            store.save_resume_extraction(
+                int(resume["id"]), int(candidate["id"]), extraction,
+            )
         payload = _payload(delivery, candidate, resume)
         try:
             resume_pdf, _ = resume_enrichment.refresh_contact_sheet(
-                _resume_bytes(resume), payload["candidate"],
+                source_pdf, payload["candidate"],
             )
         except resume_enrichment.ContactSheetRefreshError as exc:
             raise nexus_sync.NexusPermanentError(

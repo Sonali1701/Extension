@@ -27,7 +27,7 @@ def _load_panel(page: Page) -> None:
         ".includes(location.protocol);"
     )
     assert extension_check in source
-    if 'const DEFAULT_BACKEND = "https://medhunt1.onrender.com";' in source:
+    if 'const DEFAULT_BACKEND = "https://medhunt-fyxr.onrender.com";' in source:
         # Packaged UI geometry tests model a valid persisted sign-in. The
         # separate hosted-auth test below deliberately starts without one.
         page.evaluate(
@@ -56,7 +56,7 @@ def _run_hosted_auth_gate(browser_type, executable: Path) -> dict:
         ".includes(location.protocol);"
     )
     local_backend = 'const DEFAULT_BACKEND = "http://127.0.0.1:8091";'
-    hosted_backend = 'const DEFAULT_BACKEND = "https://medhunt1.onrender.com";'
+    hosted_backend = 'const DEFAULT_BACKEND = "https://medhunt-fyxr.onrender.com";'
     assert extension_check in source
     source = source.replace(extension_check, "const IS_EXTENSION = true;", 1)
     if local_backend in source:
@@ -249,6 +249,24 @@ def _run_browser(browser_type, executable: Path) -> dict:
     page = browser.new_page(viewport={"width": 420, "height": 760})
     _load_panel(page)
     _seed_profiles(page)
+
+    resume_gate = page.evaluate("""async () => {
+      const profile = {
+        source: 'webmd', name: 'Test Dentist', _candidateId: 91001,
+        _selectionKey: 'webmd:resume-gate',
+        profile_document: { kind: 'public_professional_profile' },
+      };
+      indeedLookupState.set(profile._selectionKey, {
+        status: 'not_found', emails: [], phones: [], resume_required: false,
+      });
+      await startProfessionalProfileResumeBatch([profile]);
+      return {
+        active: indeedResumeBatchState.active,
+        generated: await ensureProfessionalProfileResume(profile),
+        guidedButton: linkedinPdfControl(indeedCandidates[0], 0).includes('Save resume'),
+      };
+    }""")
+    assert resume_gate == {"active": False, "generated": None, "guidedButton": False}
 
     assert "50 profiles ready" in page.locator("body").inner_text()
     assert "candidates captured" not in page.locator("body").inner_text().lower()

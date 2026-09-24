@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const ADAPTER_REVISION = "healthcare-directory-v10";
-  const ADAPTER_REQUEST = "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST";
+  const ADAPTER_REVISION = "healthcare-directory-v12";
+  const ADAPTER_REQUEST = "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST";
   if (window.__radixsolHealthcareDirectoryAdapterRevision === ADAPTER_REVISION) return;
   window.__radixsolHealthcareDirectoryAdapterRevision = ADAPTER_REVISION;
 
@@ -72,7 +72,7 @@
     }
   }
 
-  const PROVIDER_CREDENTIAL = /^(?:M\.?D\.?|D\.?O\.?|M\.?P\.?H\.?|Ph\.?D\.?|DNP|APRN(?:-C)?|NP|FNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|AGNP(?:-(?:C|BC))?|CRNP|CNP|CNM|CRNA|PA-C|RN|LPN|MSN|BSN|DDS|DMD|FACP|FACOG)\.?$/i;
+  const PROVIDER_CREDENTIAL = /^(?:M\.?D\.?|D\.?O\.?|M\.?P\.?H\.?|Ph\.?D\.?|DNP|APRN(?:-C)?|NP|FNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|AGNP(?:-(?:C|BC))?|CRNP|CNP|CNM|CRNA|PA-C|R\.?\s*N\.?|LPN|MSN|B\.?\s*S\.?\s*N\.?|BSNRN|LCCE|REGISTERED NURSE|DDS|DMD|FACP|FACOG)\.?$/i;
 
   function providerCredentials(value) {
     const parts = clean(value, 240)
@@ -90,13 +90,14 @@
       return "Nurse Practitioner";
     }
     if (/\bPA-C\b/i.test(values)) return "Physician Assistant";
+    if (/\b(?:DDS|DMD)\b/i.test(values)) return "Dentist";
     if (/\b(?:RN|LPN)\b/i.test(values)) return "Nurse";
     return "Healthcare Provider";
   }
 
   function cleanProviderName(value) {
     const parts = clean(value, 240)
-      .replace(/^(?:dr\.?|doctor)\s+/i, "")
+      .replace(/^(?:dr\.?|doctor|mr\.?|mrs\.?|ms\.?)\s+/i, "")
       .replace(/\s*\((?:individual|person)\)\s*$/i, "")
       .split(",")
       .map((part) => clean(part, 180));
@@ -1213,13 +1214,26 @@
     const profiles = [];
     const elements = new Map();
     const seen = new Set();
-    for (const link of all('a[href*="/npi/"]')) {
+    for (const link of all("a[href]")) {
       const href = absoluteUrl(link.getAttribute("href"));
-      const npi = href.match(/\/npi\/(\d{10})(?:-|\/|$)/i)?.[1] || npiFrom(link.textContent);
+      let profileUrl;
+      try { profileUrl = new URL(href); } catch { continue; }
+      if (!/^(?:www\.)?npino\.com$/i.test(profileUrl.hostname)) continue;
+      // NPINO uses /npi/ for doctors and profession-specific paths such as
+      // /nurse/ and /dentist/ for other individual providers.
+      const npi = profileUrl.pathname.match(/^\/[a-z][a-z-]*\/(\d{10})(?:-[^/]*)?\/?$/i)?.[1];
       if (!npi || seen.has(npi)) continue;
       let card = null;
       for (let node = link; node; node = node.parentElement) {
         if (visibleText(node).length > 3000) break;
+        // Do not let an organization card inherit a person's name from an
+        // adjacent result when their common listing container is small.
+        const otherProfile = all("a[href]", node).some((anchor) => {
+          const path = absoluteUrl(anchor.getAttribute("href"));
+          const linkedNpi = path.match(/\/[a-z][a-z-]*\/(\d{10})(?:-[^/?#]*)?\/?(?:[?#]|$)/i)?.[1];
+          return linkedNpi && linkedNpi !== npi;
+        });
+        if (otherProfile) break;
         const text = visibleText(node);
         const hasThisNpi = text.includes(npi) || /\bNPI Number\s*:/i.test(text);
         const hasPersonName = all("h1, h2, h3, h4, [itemprop='name'], .provider-name", node)
@@ -1233,7 +1247,7 @@
         if (node === document.body) break;
       }
       if (!card) card = smallestContainer(link, /\bNPI Number\s*:/i);
-      const nameLink = card.querySelector?.('h2 a[href*="/npi/"], h3 a[href*="/npi/"]') || link;
+      const nameLink = card.querySelector?.("h2 a[href], h3 a[href]") || link;
       const name = candidateName(card, nameLink, npi) || cleanProviderName(nameLink.textContent);
       if (!looksLikePersonName(name)) continue;
       const text = visibleText(card);
@@ -1351,11 +1365,14 @@
       const link = root.querySelector?.("a.prov-name[href*='/doctor/'], a[href*='/doctor/'][href*='overview']")
         || (profilePath ? null : null);
       const href = link?.getAttribute("href") || (profilePath ? location.href : "");
-      const sourceUrl = absoluteUrl(href);
+      const linkedUrl = absoluteUrl(href);
       let parsed;
-      try { parsed = new URL(sourceUrl); } catch { continue; }
+      try { parsed = new URL(linkedUrl); } catch { continue; }
       if (parsed.hostname.toLowerCase() !== "doctor.webmd.com"
         || !/^\/doctor\/[^/?#]+-overview\/?$/i.test(parsed.pathname)) continue;
+      const sourceUrl = `${parsed.origin}${parsed.pathname}`;
+      const pathKey = parsed.pathname.replace(/\/+$/, "").toLowerCase();
+      if (seen.has(pathKey)) continue;
       const physician = jsonLdObjects(root).find((value) => hasSchemaType(value, "Physician"))
         || jsonLdObjects().find((value) => hasSchemaType(value, "Physician") && sameProfileUrl(value.url || "", sourceUrl))
         || null;
@@ -1365,12 +1382,12 @@
       if (!looksLikePersonName(name)) continue;
       const npi = npiFrom(root.getAttribute?.("data-npi") || physician?.identifier?.value || physician?.identifier || "");
       const sourceId = npi || parsed.pathname.replace(/^\/doctor\//i, "").replace(/-overview\/?$/i, "");
-      if (!sourceId || seen.has(sourceId)) continue;
+      if (!sourceId) continue;
       const cardText = visibleText(root);
       const specialty = clean(root.querySelector?.(".prov-specialty, [class*='specialty']")?.textContent
         || schemaNames(physician?.medicalSpecialty)[0] || specialtyFromPage(), 180);
       const imageAlt = clean(root.querySelector?.("img[alt]")?.getAttribute("alt") || "", 300);
-      const location = clean(
+      const providerLocation = clean(
         cardText.match(/\b([A-Za-z .'-]+,\s*[A-Z]{2})(?=\s*[-|])/i)?.[1]
           || imageAlt.match(/\b([A-Za-z .'-]+,\s*[A-Z]{2})\b/)?.[1]
           || "",
@@ -1382,7 +1399,7 @@
       }) : null;
       const profile = {
         name,
-        location: documentProfile?.location || location,
+        location: documentProfile?.location || providerLocation,
         headline: specialty || providerProfession(credentials),
         notes: profileNotes({
           npi, specialty, address: documentProfile?.address || "",
@@ -1399,7 +1416,7 @@
         source_id: sourceId,
         captured_at: new Date().toISOString(),
       };
-      seen.add(sourceId);
+      seen.add(pathKey);
       profiles.push(profile);
       elements.set(sourceId, root === document ? document.documentElement : root);
       if (profiles.length >= 100) break;
@@ -1544,9 +1561,11 @@
     const profile = lastProfiles[Number(index)];
     if (!profile) return { ok: false, error: "That displayed provider is no longer available." };
     const element = lastElements.get(profile.source_id);
-    const link = element?.matches?.("a[href]") ? element : element?.querySelector?.(
-      'a[href*="/npi/"], a[href*="/doctors/"], a[href*="/nurse-practitioners/"], a[href*="/find-a-doctor/"], a.prov-name, a[href*="-overview"], a.information'
-    );
+    const link = element?.matches?.("a[href]") ? element : (PLATFORM.key === "npino"
+      ? element?.querySelector?.("h2 a[href], h3 a[href]")
+      : element?.querySelector?.(
+        'a[href*="/npi/"], a[href*="/doctors/"], a[href*="/nurse-practitioners/"], a[href*="/find-a-doctor/"], a.prov-name, a[href*="-overview"], a.information'
+      ));
     if (link) {
       link.scrollIntoView({ block: "center", behavior: "auto" });
       link.click();

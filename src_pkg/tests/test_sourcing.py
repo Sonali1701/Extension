@@ -22,6 +22,7 @@ os.environ["PDL_TRUST_PROVIDER_MATCH"] = "0"
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
+import pytest
 
 import api as api_module
 from sourcing import (
@@ -35,6 +36,7 @@ from sourcing import (
     config,
     storage,
     resume_enrichment,
+    resume_extraction,
     pdl_client,
     identity_resolution,
     multi_provider,
@@ -43,6 +45,7 @@ from sourcing import (
     contact_access,
     person_name,
     healthboard_auth,
+    analytics_delivery,
     quick_sourcer_client,
     profile_resume,
     zoom_sms,
@@ -55,6 +58,19 @@ config.STORAGE_ENABLED = False
 config.DEMO_MODE = True
 config.PDL_API_KEY = ""
 config.PDL_ENABLED = False
+
+
+def _resume_pdf(name: str) -> bytes:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+
+    output = BytesIO()
+    page = canvas.Canvas(output, pagesize=letter, invariant=1)
+    page.drawString(48, 740, name)
+    page.drawString(48, 710, "Professional experience")
+    page.showPage()
+    page.save()
+    return output.getvalue()
 
 
 def test_public_api_requires_healthboard_session_without_origin_header(monkeypatch):
@@ -107,8 +123,8 @@ def test_public_api_requires_healthboard_session_without_origin_header(monkeypat
             login_body["device_id"] = "D" * 43
             second_login = await client.post("/auth/verify-code", json=login_body)
             assert second_login.status_code == 200
-            assert second_login.json()["device_approval_required"] is True
-            assert second_login.json()["device"]["status"] == "pending"
+            assert second_login.json()["device_approval_required"] is False
+            assert second_login.json()["device"]["status"] == "approved"
 
     asyncio.run(exercise())
 
@@ -120,41 +136,23 @@ def test_enterprise_device_registration_approval_limit_and_recovery(monkeypatch)
     first = store.register_extension_device(user_id, "A" * 43, device_name="Laptop")
     second = store.register_extension_device(user_id, "B" * 43, device_name="Desktop")
     assert first["status"] == "approved"
-    assert second["status"] == "pending"
-
-    try:
-        store.approve_extension_device(second["id"], actor_user_id=user_id)
-        assert False, "a regular user must not approve devices"
-    except PermissionError:
-        pass
-    approved_second = store.approve_extension_device(
-        second["id"], actor_user_id="healthboard-admin", actor_is_admin=True,
-    )
-    assert approved_second["status"] == "approved"
-    assert store.authorize_extension_device(user_id, "B" * 43)["status"] == "approved"
+    assert second["status"] == "approved"
 
     third = store.register_extension_device(user_id, "C" * 43, device_name="Replacement")
-    assert third["status"] == "pending"
-    try:
-        store.approve_extension_device(
-            third["id"], actor_user_id="healthboard-admin", actor_is_admin=True,
-        )
-        assert False, "a third approved device must be rejected at the device limit"
-    except ValueError as exc:
-        assert "2 approved devices" in str(exc)
+    assert third["status"] == "approved"
+    assert store.authorize_extension_device(user_id, "B" * 43)["status"] == "approved"
 
     revoked = store.revoke_extension_device(first["id"], actor_user_id=user_id)
     assert revoked["status"] == "revoked"
-    assert store.authorize_extension_device(user_id, "A" * 43)["status"] == "revoked"
-    assert store.approve_extension_device(
-        third["id"], actor_user_id="healthboard-admin", actor_is_admin=True,
-    )["status"] == "approved"
+    approved = store.register_extension_device(user_id, "A" * 43, device_name="Laptop")
+    assert approved["status"] == "approved"
+    assert store.authorize_extension_device(user_id, "A" * 43)["status"] == "approved"
 
 
-def test_only_admin_can_approve_pending_installation_via_api(monkeypatch):
+def test_admin_device_inventory_reports_multiple_installations_via_api(monkeypatch):
     store.reset()
     monkeypatch.setattr(config, "HEALTHBOARD_BASE_URL", "https://board.example.test")
-    monkeypatch.setattr(config, "MEDHUNT_MAX_REGISTERED_DEVICES", 2)
+    monkeypatch.setattr(config, "MEDHUNT_HEALTHBOARD_SERVICE_TOKEN", "halo-test-service-token")
     user_id = "device-api-user"
     first_id, second_id = "E" * 43, "F" * 43
     store.register_extension_device(user_id, first_id, device_name="Main laptop")
@@ -174,20 +172,10 @@ def test_only_admin_can_approve_pending_installation_via_api(monkeypatch):
             }
             listed = await client.get("/auth/devices", headers=first_headers)
             assert listed.status_code == 200
-            assert listed.json()["max_approved_devices"] == 2
             assert len(listed.json()["items"]) == 2
 
-            forbidden = await client.post(
-                f"/auth/devices/{pending['id']}/approve", headers=first_headers,
-            )
-            assert forbidden.status_code == 403
-
             identity_role["value"] = "admin"
-            approved = await client.post(
-                f"/auth/devices/{pending['id']}/approve", headers=first_headers,
-            )
-            assert approved.status_code == 200
-            assert approved.json()["device"]["status"] == "approved"
+            assert any(item.get("approved_device_count", 0) >= 2 for item in listed.json()["items"])
 
             status = await client.get("/auth/device-status", headers={
                 "X-HealthBoard-Extension-Token": "second-token",
@@ -197,6 +185,79 @@ def test_only_admin_can_approve_pending_installation_via_api(monkeypatch):
             assert status.json()["approved"] is True
 
     asyncio.run(exercise())
+
+
+def test_halo_service_assignment_requires_reply_and_org_scope(monkeypatch):
+    store.reset()
+    monkeypatch.setattr(config, "HEALTHBOARD_BASE_URL", "https://board.example.test")
+    monkeypatch.setattr(config, "MEDHUNT_HEALTHBOARD_SERVICE_TOKEN", "halo-test-service-token")
+    conversation = store.get_or_create_sms_conversation(
+        123, "+15551234567", candidate_name="A Candidate", initiated_by="org-owner",
+    )
+
+    async def exercise():
+        transport = httpx.ASGITransport(app=api_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            path = f"/internal/halo/conversations/{conversation['id']}/assign"
+            body = {"user_ids": ["org-owner"], "actor_user_id": "halo-admin",
+                    "recruiter_user_id": "team-recruiter"}
+            assert (await client.post(path, json=body)).status_code == 401
+            headers = {"X-Medhunt-Service-Token": "halo-test-service-token"}
+            wrong_org = await client.post(path, headers=headers,
+                                          json={**body, "user_ids": ["other-org"]})
+            assert wrong_org.status_code == 403
+            no_reply = await client.post(path, headers=headers, json=body)
+            assert no_reply.status_code == 409
+            store.create_sms_message(conversation["id"], "inbound", "Interested",
+                                     status="received")
+            assigned = await client.post(path, headers=headers, json=body)
+            assert assigned.status_code == 200
+            assert assigned.json()["conversation"]["assigned_recruiter_id"] == "team-recruiter"
+
+    asyncio.run(exercise())
+
+
+def test_failed_halo_analytics_delivery_is_retried(monkeypatch):
+    store.reset()
+    monkeypatch.setattr(config, "HEALTHBOARD_BASE_URL", "https://board.example.test")
+    monkeypatch.setattr(config, "MEDHUNT_HEALTHBOARD_SERVICE_TOKEN", "halo-test-service-token")
+    candidate_id = store.add_candidate("Test Nurse", "", source="npino")
+    event = store.record_enrichment_event(
+        "recruiter-1", candidate_id, "found", provider="quick_sourcer",
+        halo_pending=True,
+    )
+    store.update_candidate(candidate_id, source="webmd")
+    calls = []
+
+    def send(**payload):
+        calls.append(payload)
+        if len(calls) == 1:
+            raise RuntimeError("temporary Halo outage")
+        return True
+
+    monkeypatch.setattr(healthboard_auth, "report_enrichment_service", send)
+    assert analytics_delivery.flush_pending() == 0
+    assert [row["id"] for row in store.pending_halo_enrichment_events()] == [event["id"]]
+    assert analytics_delivery.flush_pending() == 1
+    assert store.pending_halo_enrichment_events() == []
+    assert calls[0]["event_id"] == calls[1]["event_id"]
+    assert calls[0]["platform"] == calls[1]["platform"] == "npino"
+    assert calls[0]["source"] == "npino"
+
+
+def test_halo_duplicate_acknowledgement_clears_outbox(monkeypatch):
+    store.reset()
+    monkeypatch.setattr(config, "HEALTHBOARD_BASE_URL", "https://board.example.test")
+    candidate_id = store.add_candidate("Test Nurse", "", source="npino")
+    event = store.record_enrichment_event(
+        "recruiter-1", candidate_id, "found", provider="quick_sourcer",
+        halo_pending=True,
+    )
+    monkeypatch.setattr(healthboard_auth.httpx, "post", lambda *args, **kwargs:
+                        httpx.Response(200, json={"recorded": False},
+                                       request=httpx.Request("POST", args[0])))
+    assert analytics_delivery.deliver(event, token="test-capture-token") is True
+    assert store.pending_halo_enrichment_events() == []
 
 
 def _pdl_mobile_contact(value: str) -> dict:
@@ -1243,13 +1304,8 @@ def test_resume_storage_embeds_only_current_trusted_contacts():
     from pypdf import PdfReader, PdfWriter
 
     store.reset()
-    source = BytesIO()
-    writer = PdfWriter()
-    writer.add_blank_page(width=612, height=792)
-    writer.write(source)
-    source_pdf = source.getvalue()
-
     legacy_id = store.add_candidate("Legacy Person", "Atlanta, GA", source="indeed")
+    source_pdf = _resume_pdf("Legacy Person")
     store.update_candidate(
         legacy_id, emails=["legacy@example.test"], phones=["(404) 555-0100"],
         enrich_status="success", contact_expires_at=time.time() + 3600,
@@ -1260,6 +1316,7 @@ def test_resume_storage_embeds_only_current_trusted_contacts():
     assert store.get_resume(legacy_id, legacy_resume["id"])["data"] == source_pdf
 
     expired_id = store.add_candidate("Jane Doe", "Atlanta, GA", source="indeed")
+    source_pdf = _resume_pdf("Jane Doe")
     _save_current_trusted_pdl(expired_id)
     store.update_candidate(expired_id, contact_expires_at=time.time() - 1)
     expired_resume = api_module._store_resume_pdf(expired_id, "expired.pdf", source_pdf)
@@ -2868,6 +2925,28 @@ def test_resume_contact_sheet_preserves_source_pages():
     assert repeated == enriched
 
 
+def test_resume_processing_preserves_source_pages_behind_medhunt_cover():
+    from pypdf import PdfReader
+    from sourcing import resume_extraction
+
+    source = _resume_pdf("Jennifer Merlo")
+    candidate = {
+        "id": 2048, "name": "Elare Carl", "location": "Bloomfield, NY",
+        "emails": ["elare@example.test"], "phones": ["(585) 555-0100"],
+    }
+    legacy_mismatched = resume_enrichment.add_contact_sheet(source, candidate)[0]
+    reader = PdfReader(BytesIO(legacy_mismatched))
+    assert "Elare Carl" in reader.pages[0].extract_text()
+    assert "Jennifer Merlo" in reader.pages[1].extract_text()
+
+    original, extraction, resume_name = resume_enrichment.prepare_candidate_resume(
+        legacy_mismatched, candidate,
+    )
+    assert resume_name == "Jennifer Merlo"
+    assert "Jennifer Merlo" in PdfReader(BytesIO(original)).pages[0].extract_text()
+    assert extraction["fields"]["full_name"] == "Jennifer Merlo"
+
+
 def test_resume_contact_sheet_contains_only_latest_trusted_phone():
     from pypdf import PdfReader, PdfWriter
 
@@ -3225,7 +3304,7 @@ def test_local_api_token_protects_cross_origin_api_access(monkeypatch):
     monkeypatch.setattr(config, "LOCAL_API_TOKEN", token)
     candidate_id = store.add_candidate("Token Test", "Atlanta, GA", source="indeed")
     resume = store.attach_resume(
-        candidate_id, "token-test.pdf", b"%PDF-1.4 local token test"
+        candidate_id, "token-test.pdf", _resume_pdf("Token Test")
     )
     extension_origin = f"chrome-extension://{'a' * 32}"
 
@@ -3350,7 +3429,10 @@ def test_hosted_extension_origin_gate_fails_closed(monkeypatch):
 
 
 def test_api_workflow_and_extension_cors(monkeypatch):
+    from pypdf import PdfReader
+
     store.reset()
+    monkeypatch.setattr(config, "QUICK_SOURCER_TRUSTED_FOR_SYNC", True)
 
     def fake_quick_lookup(candidate_id):
         candidate = store.get_candidate(candidate_id)
@@ -3470,10 +3552,23 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             assert (await client.post(f"/candidates/{imported_id}/contact-lookup")).status_code == 200
             resume_dir = Path(tempfile.mkdtemp())
             resume_path = resume_dir / "Alex-Morgan-resume.pdf"
-            resume_path.write_bytes(b"%PDF-1.4 test resume")
+            resume_path.write_bytes(_resume_pdf("Jennifer Merlo"))
+            probe = resume_extraction.extract(
+                resume_path.read_bytes(), store.get_candidate(imported_id),
+            )
+            assert probe["fields"].get("full_name") == "Jennifer Merlo", (
+                resume_extraction.config.RESUME_OCR_ENABLED, probe,
+            )
             original_resume_dir = config.RESUME_DOWNLOAD_DIR
             config.RESUME_DOWNLOAD_DIR = resume_dir.resolve()
             try:
+                attached = await client.post(
+                    f"/candidates/{imported_id}/resume/from-download",
+                    json={"path": str(resume_path), "filename": resume_path.name},
+                )
+                assert attached.status_code == 200
+                assert store.list_resumes(imported_id)
+                resume_path.write_bytes(_resume_pdf("Alex Morgan"))
                 attached = await client.post(
                     f"/candidates/{imported_id}/resume/from-download",
                     json={"path": str(resume_path), "filename": resume_path.name},
@@ -3497,7 +3592,26 @@ def test_api_workflow_and_extension_cors(monkeypatch):
                 f"/candidates/{imported_id}/resume/from-browser",
                 json={
                     "content_base64": base64.b64encode(
-                        b"leading bytes%PDF-1.4 browser-captured resume"
+                        b"leading bytes" + _resume_pdf("Jennifer Merlo")
+                    ).decode("ascii"),
+                    "filename": "browser-captured-resume.pdf",
+                },
+            )
+            assert captured.status_code == 200
+            wrong_capture_id = captured.json()["resume"]["id"]
+            wrong_capture_download = await client.get(
+                f"/candidates/{imported_id}/resumes/{wrong_capture_id}"
+            )
+            assert wrong_capture_download.status_code == 200
+            wrong_capture_reader = PdfReader(BytesIO(wrong_capture_download.content))
+            assert "Alex Morgan" in wrong_capture_reader.pages[0].extract_text()
+            assert "Jennifer Merlo" in wrong_capture_reader.pages[1].extract_text()
+
+            captured = await client.post(
+                f"/candidates/{imported_id}/resume/from-browser",
+                json={
+                    "content_base64": base64.b64encode(
+                        b"leading bytes" + _resume_pdf("Alex Morgan")
                     ).decode("ascii"),
                     "filename": "browser-captured-resume.pdf",
                 },
@@ -3514,7 +3628,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
                 f"/candidates/{imported_id}/resume/from-browser",
                 json={
                     "content_base64": base64.b64encode(
-                        b"leading bytes%PDF-1.4 browser-captured resume"
+                        b"leading bytes" + _resume_pdf("Alex Morgan")
                     ).decode("ascii"),
                     "filename": "browser-captured-resume.pdf",
                 },
@@ -3522,6 +3636,18 @@ def test_api_workflow_and_extension_cors(monkeypatch):
             assert duplicate_capture.status_code == 200
             assert duplicate_capture.json()["resume"]["id"] == captured_resume_id
             assert duplicate_capture.json()["resume"]["deduplicated"] is True
+            legacy_wrong_data = _resume_pdf("Jennifer Merlo")
+            legacy_wrong_extraction = resume_extraction.extract(
+                legacy_wrong_data, store.get_candidate(imported_id),
+            )
+            legacy_wrong = store.attach_resume(
+                imported_id, "legacy-wrong-resume.pdf", legacy_wrong_data,
+                extraction=legacy_wrong_extraction,
+            )
+            blocked_legacy_download = await client.get(
+                f"/candidates/{imported_id}/resumes/{legacy_wrong['id']}"
+            )
+            assert blocked_legacy_download.status_code == 200
             candidate_view = await client.get(f"/candidates/{imported_id}")
             assert candidate_view.status_code == 200
             assert all(
@@ -3601,7 +3727,7 @@ def test_api_workflow_and_extension_cors(monkeypatch):
     asyncio.run(exercise_api())
 
 
-def test_usnews_professional_profile_resume_is_generated_stored_and_deduplicated():
+def test_usnews_professional_profile_resume_is_generated_stored_and_deduplicated(monkeypatch):
     from pypdf import PdfReader
 
     store.reset()
@@ -3634,10 +3760,23 @@ def test_usnews_professional_profile_resume_is_generated_stored_and_deduplicated
         "address": "1305 York Ave, New York, NY 10021",
         "location": "New York, NY",
     }
+    monkeypatch.setattr(config, "QUICK_SOURCER_TRUSTED_FOR_SYNC", True)
+
+    def grant_contact(cid):
+        store.update_candidate(
+            cid, emails=[f"candidate-{cid}@example.test"],
+            verification={"source": "quick_sourcer"},
+        )
 
     async def exercise():
         transport = httpx.ASGITransport(app=api_module.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            without_contact = await client.post(
+                f"/candidates/{candidate_id}/professional-profile-resume", json=body,
+            )
+            assert without_contact.status_code == 409
+            assert store.list_resumes(candidate_id) == []
+            grant_contact(candidate_id)
             first = await client.post(
                 f"/candidates/{candidate_id}/professional-profile-resume", json=body,
             )
@@ -3674,6 +3813,7 @@ def test_usnews_professional_profile_resume_is_generated_stored_and_deduplicated
                 source_url="https://www.medifind.com/doctors/brian-e-louie/10650877",
                 source_id="10650877",
             )
+            grant_contact(medifind_id)
             medifind_body = {
                 **body,
                 "source_label": "MediFind",
@@ -3702,6 +3842,7 @@ def test_usnews_professional_profile_resume_is_generated_stored_and_deduplicated
                 source_url="https://www.commonspirit.org/find-a-doctor/clara-zee-1407550627",
                 source_id="1407550627",
             )
+            grant_contact(commonspirit_id)
             commonspirit_body = {
                 **medifind_body,
                 "source_label": "CommonSpirit Health",
@@ -3726,6 +3867,7 @@ def test_usnews_professional_profile_resume_is_generated_stored_and_deduplicated
                 source_url="https://providers.sharecare.com/doctor/dr-raja-flores",
                 source_id="1306821244",
             )
+            grant_contact(sharecare_id)
             sharecare_body = {
                 **medifind_body,
                 "source_label": "Sharecare",
@@ -3785,13 +3927,14 @@ def test_profile_resume_fingerprint_changes_with_public_credentials():
 
 def test_cloud_resume_api_stores_r2_metadata(monkeypatch):
     store.reset()
-    candidate_id = store.add_candidate("Cloud Resume", "Atlanta, GA", source="indeed")
+    candidate_id = store.add_candidate("Cloud Example", "Atlanta, GA", source="indeed")
     resume_dir = Path(tempfile.mkdtemp()).resolve()
     resume_path = resume_dir / "cloud-resume.pdf"
-    pdf = b"%PDF-1.4 cloud fixture"
+    pdf = _resume_pdf("Cloud Example")
     resume_path.write_bytes(pdf)
 
     monkeypatch.setattr(config, "RESUME_DOWNLOAD_DIR", resume_dir)
+    monkeypatch.setattr(config, "QUICK_SOURCER_TRUSTED_FOR_SYNC", True)
     monkeypatch.setattr(config, "STORAGE_ENABLED", True)
     monkeypatch.setattr(storage, "upload_resume", lambda cid, filename, data: {
         "storage_provider": "r2",
@@ -3806,6 +3949,15 @@ def test_cloud_resume_api_stores_r2_metadata(monkeypatch):
     async def exercise_cloud_resume():
         transport = httpx.ASGITransport(app=api_module.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            blocked = await client.post(
+                f"/candidates/{candidate_id}/resume/from-download",
+                json={"path": str(resume_path), "filename": resume_path.name},
+            )
+            assert blocked.status_code == 409
+            store.update_candidate(
+                candidate_id, emails=["cloud-resume@example.test"],
+                verification={"source": "quick_sourcer"},
+            )
             attached = await client.post(
                 f"/candidates/{candidate_id}/resume/from-download",
                 json={"path": str(resume_path), "filename": resume_path.name},
@@ -3822,7 +3974,11 @@ def test_cloud_resume_api_stores_r2_metadata(monkeypatch):
                 f"/candidates/{candidate_id}/resumes/{metadata['id']}"
             )
             assert downloaded.status_code == 200
-            assert downloaded.content == pdf
+            from pypdf import PdfReader
+            delivered = PdfReader(BytesIO(downloaded.content))
+            assert len(delivered.pages) == 2
+            assert "Cloud Example" in delivered.pages[0].extract_text()
+            assert "Cloud Example" in delivered.pages[1].extract_text()
 
     asyncio.run(exercise_cloud_resume())
 
@@ -3847,7 +4003,8 @@ def test_frontend_is_manifest_v3_compatible():
     run_script = (project_root / "run-benchmark-backend.ps1").read_text(encoding="utf-8")
 
     assert manifest["manifest_version"] == 3
-    assert manifest["version"] == "3.26.6"
+    released_manifest = json.loads((project_root / "release" / "frontend" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["version"] == released_manifest["version"]
     assert "medhunt" in manifest["name"].casefold()
     assert "radixsol" not in manifest["name"].casefold()
     assert "medhunt" in manifest["action"]["default_title"].casefold()
@@ -3855,7 +4012,7 @@ def test_frontend_is_manifest_v3_compatible():
     assert "medhunt" in index.casefold()
     assert "medhunt-mark" in app_script
     assert "radixsol scout" not in app_script.casefold()
-    assert 'const DEFAULT_BACKEND = "http://127.0.0.1:8091";' in app_script
+    assert 'const DEFAULT_BACKEND = "https://medhunt-fyxr.onrender.com";' in app_script
     assert 'const BACKEND_STORAGE_KEY = "medhuntBenchmarkABackendUrl";' in app_script
     assert 'if (DEFAULT_BACKEND.startsWith("https://"))' in app_script
     assert "DEFAULT_PORT = 8091" in launcher
@@ -3934,7 +4091,7 @@ def test_frontend_is_manifest_v3_compatible():
     assert "profile.php" in facebook_script
     assert "RADIXSOL_SCAN_PLATFORM_CANDIDATES" in facebook_script
     assert "RADIXSOL_SCAN_PLATFORM_CANDIDATES" in healthcare_directory_script
-    assert "healthcare-directory-v9" in healthcare_directory_script
+    assert "healthcare-directory-v12" in healthcare_directory_script
     assert "U.S. News Doctor Finder" in healthcare_directory_script
     assert "MediFind" in healthcare_directory_script
     assert "CommonSpirit Health" in healthcare_directory_script
@@ -3942,7 +4099,6 @@ def test_frontend_is_manifest_v3_compatible():
     assert 'key: "usnews"' in app_script
     assert 'key: "medifind"' in app_script
     assert "professional-profile-resume" in app_script
-    assert 'new Set(["usnews", "medifind", "commonspirit", "sharecare"])' in app_script
     assert 'key: "sharecare"' in app_script
     assert "captureProfessionalProfileInBackground" in app_script
     assert "startProfessionalProfileResumeBatch" in app_script

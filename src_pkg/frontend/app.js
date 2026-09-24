@@ -2,7 +2,7 @@
 
 const $ = (selector, element = document) => element.querySelector(selector);
 const IS_EXTENSION = ["chrome-extension:", "moz-extension:"].includes(location.protocol);
-const DEFAULT_BACKEND = "https://medhunt1.onrender.com";
+const DEFAULT_BACKEND = "https://medhunt-fyxr.onrender.com";
 const HOSTED_AUTH_REQUIRED = IS_EXTENSION && DEFAULT_BACKEND.startsWith("https://");
 const LOCAL_API_TOKEN = "__MEDHUNT_LOCAL_API_TOKEN__";
 const BACKEND_STORAGE_KEY = "medhuntBenchmarkABackendUrl";
@@ -76,8 +76,8 @@ const SOURCING_PLATFORMS = {
     label: "NPI No.",
     host: (hostname) => hostname === "npino.com" || hostname.endsWith(".npino.com"),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v12",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST",
     resumeCapture: false,
   },
   nysed: {
@@ -85,8 +85,8 @@ const SOURCING_PLATFORMS = {
     label: "NYSED",
     host: (hostname) => hostname === "eservices.nysed.gov",
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v12",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST",
     resumeCapture: false,
   },
   npiprofile: {
@@ -94,8 +94,8 @@ const SOURCING_PLATFORMS = {
     label: "NPI Profile",
     host: (hostname) => hostname === "npiprofile.com" || hostname.endsWith(".npiprofile.com"),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v12",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST",
     resumeCapture: false,
   },
   usnews: {
@@ -104,8 +104,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => hostname === "health.usnews.com" &&
       /^\/(?:doctors|nurse-practitioners)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v12",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST",
     resumeCapture: false,
   },
   medifind: {
@@ -114,8 +114,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => (hostname === "medifind.com" || hostname.endsWith(".medifind.com"))
       && /^\/(?:doctors|specialty)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v12",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST",
     resumeCapture: false,
   },
   commonspirit: {
@@ -124,8 +124,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => (hostname === "commonspirit.org" || hostname.endsWith(".commonspirit.org"))
       && /^\/(?:search|find-a-(?:doctor|location))(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v12",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST",
     resumeCapture: false,
   },
   sharecare: {
@@ -134,8 +134,8 @@ const SOURCING_PLATFORMS = {
     host: (hostname, url) => hostname === "providers.sharecare.com"
       && /^\/(?:find-a-doctor|doctor)(?:\/|$)/i.test(url?.pathname || ""),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v12",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST",
     resumeCapture: false,
   },
   webmd: {
@@ -146,8 +146,8 @@ const SOURCING_PLATFORMS = {
         || /^\/providers\/specialty(?:\/|$)/i.test(url?.pathname || "")
         || /^\/doctor\/[^/]+-overview\/?$/i.test(url?.pathname || "")),
     contentScript: "healthcare-directory-content.js",
-    adapterRevision: "healthcare-directory-v10",
-    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V10_REQUEST",
+    adapterRevision: "healthcare-directory-v12",
+    adapterRequestType: "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST",
     resumeCapture: false,
   },
 };
@@ -949,8 +949,10 @@ async function loadAuth() {
 
 function renderAuthState() {
   const button = $("#authButton");
+  const logoutButton = $("#logoutButton");
   const avatar = $("#userAvatar");
   if (!button || !avatar) return;
+  if (logoutButton) logoutButton.hidden = !(authConfig.enabled && authSession?.extension_token);
   if (authConfig.enabled && authSession?.user) {
     const user = authSession.user;
     avatar.textContent = initials(user.name || user.email || "User");
@@ -1120,16 +1122,15 @@ async function checkDeviceApproval() {
 
 function deviceCard(device, isAdmin = false) {
   const owner = device.user_name || device.user_email || device.user_id || "Account user";
-  const canApprove = isAdmin && ["pending", "expired"].includes(device.status);
   const canRevoke = device.status !== "revoked" && !device.current;
   return `<div class="device-row">
     <div class="device-row-main">
       <div class="row spread"><strong>${escapeHtml(device.device_name || "Medhunt browser")}</strong><span class="pill ${device.status === "approved" ? "live" : ""}">${escapeHtml(device.status)}</span></div>
       <span class="muted small">${escapeHtml(owner)}${device.current ? " · This device" : ""}</span>
+      ${isAdmin && Number(device.approved_device_count) > 1 ? `<span class="muted small">${Number(device.approved_device_count)} approved devices on this account</span>` : ""}
       <span class="muted small">Last used ${escapeHtml(deviceTimestamp(device.last_seen))} · ID …${escapeHtml(device.installation_suffix || "")}</span>
     </div>
     <div class="row device-actions">
-      ${canApprove ? `<button type="button" class="btn sm teal" data-action="approve-device" data-device-id="${Number(device.id)}">Approve</button>` : ""}
       ${canRevoke ? `<button type="button" class="btn sm ghost" data-action="revoke-device" data-device-id="${Number(device.id)}">Revoke</button>` : ""}
     </div>
   </div>`;
@@ -1144,19 +1145,13 @@ async function showAccount() {
         <img class="privacy-dialog-logo" src="icons/medhunt-logo.png" alt="" aria-hidden="true">
         <div><span class="privacy-eyebrow">Account security</span><h2 id="deviceAccountTitle">Registered devices</h2></div>
       </div>
-      <p class="muted small">Up to ${Number(result.max_approved_devices || 2)} devices can be approved. Only a Healthcareboard administrator can approve a new installation; users can review and revoke their devices here.</p>
-      <div class="device-list">${devices.length ? devices.map((device) => deviceCard(device, result.is_admin)).join("") : `<p class="muted">No registered devices.</p>`}</div>
+      <p class="muted small">Your registered devices. Organization and platform administrators manage device approvals in Halo.</p>
+      <div class="device-list">${devices.length ? devices.map((device) => deviceCard(device, false)).join("") : `<p class="muted">No registered devices.</p>`}</div>
       <div class="row modal-actions">
         <button type="button" class="btn ghost" data-action="logout">Sign out</button>
         <button type="button" class="btn" data-action="close-modal">Close</button>
       </div>
     </div></div>`;
-}
-
-async function approveDevice(button) {
-  await api(`/auth/devices/${Number(button.dataset.deviceId)}/approve`, { method: "POST" });
-  notify("Device approved.");
-  await showAccount();
 }
 
 async function revokeDevice(button) {
@@ -1659,7 +1654,11 @@ async function enrichProfessionalProfileAndResume(profile) {
     resume_error: "",
   });
   updateIndeedLookupProgressUi(profile);
-  const captured = await captureProfessionalProfileInBackground(profile);
+  const captured = profile.profile_document?.kind === "public_professional_profile"
+    && profile._detail_capture_ready !== false
+    && sameProfessionalProfileUrl(activeSourcingPageUrl, profile.source_url)
+    ? profile
+    : await captureProfessionalProfileInBackground(profile);
   const platform = SOURCING_PLATFORMS[profile.source];
   if (!captured?.profile_document) {
     throw new Error(`${platform?.label || "The profile"} did not contain professional details.`);
@@ -1697,6 +1696,7 @@ function startProfessionalProfileResumeBatch(profiles) {
   const pending = (profiles || []).filter((profile) => (
     PROFESSIONAL_PROFILE_SOURCES.has(profile?.source)
       && Number(profile._candidateId)
+      && hasCompleteIndeedContact(indeedLookupFor(profile))
       && (!indeedLookupFor(profile).resume || !profile._detailProfileCaptured)
   ));
   if (!pending.length || indeedResumeBatchState.active) return Promise.resolve();
@@ -1813,7 +1813,7 @@ function publicRecordButton(name, location, candidateId = 0, className = "btn gh
   return `<button type="button" class="${className}" data-action="public-records"
     data-qs-name="${escapeHtml(name)}"
     data-qs-location="${escapeHtml(location || "")}"
-    data-qs-candidate="${Number(candidateId) || 0}">Public records</button>`;
+    data-qs-candidate="${Number(candidateId) || 0}">Candidate details</button>`;
 }
 
 function publicRecordRetryAttributes(context) {
@@ -2153,6 +2153,9 @@ function linkedinPdfControl(profile, index) {
   if (result.resume_status === "downloading") {
     return `<div class="linkedin-pdf-tools"><span>Resume in progress</span></div>`;
   }
+  if (!hasCompleteIndeedContact(result)) {
+    return `<div class="linkedin-pdf-tools"><span>Find a phone number or email before saving a resume.</span></div>`;
+  }
   return `<div class="linkedin-pdf-tools">
     ${result.resume_error ? `<span>Resume unavailable</span>` : ""}
     <button type="button" class="linkedin-pdf-button" data-action="capture-linkedin-pdf" data-index="${index}">Save resume</button>
@@ -2467,6 +2470,7 @@ async function ensureProfessionalProfileResume(profile) {
   const documentProfile = profile?.profile_document;
   if (
     !["usnews", "medifind", "commonspirit", "sharecare", "webmd"].includes(profile?.source) || !candidateId
+    || !hasCompleteIndeedContact(indeedLookupFor(profile))
     || documentProfile?.kind !== "public_professional_profile"
   ) return null;
   const key = `${candidateId}|${JSON.stringify(documentProfile)}`;
@@ -3147,6 +3151,9 @@ async function captureLinkedinPdf(index) {
   if (!profile || activeSourcingPlatform.key !== "linkedin") {
     throw new Error("Open the captured profile first.");
   }
+  if (!hasCompleteIndeedContact(indeedLookupFor(profile))) {
+    throw new Error("Find a phone number or email before saving a resume.");
+  }
   if (!profile._candidateId) await saveDisplayedIndeedCandidates(activeSourcingPageUrl, [profile]);
   if (!profile._candidateId) throw new Error("The profile is not ready for resume capture.");
 
@@ -3374,12 +3381,13 @@ async function lookupSelectedIndeedCandidates() {
     }
     if (
       profile.source === "linkedin" && activeSourcingPlatform.automaticPdfCapture &&
-      result.status === "found" && !result.resume
+      hasCompleteIndeedContact(result) && !result.resume
     ) {
       linkedinResumeQueue.push(profile);
     }
     if (
       PROFESSIONAL_PROFILE_SOURCES.has(profile.source)
+      && hasCompleteIndeedContact(result)
       && (!result.resume || !profile._detailProfileCaptured)
     ) {
       professionalProfileResumeQueue.push(profile);
@@ -3575,6 +3583,7 @@ async function processPendingResumeEvents() {
 }
 
 async function saveStoredResumeDownload(profile, candidateId, resume) {
+  if (!hasCompleteIndeedContact(indeedLookupFor(profile))) return null;
   const safeName = String(profile.name || "candidate")
     .replace(/[^a-z0-9 _-]/gi, "_")
     .trim()
@@ -3624,7 +3633,7 @@ async function downloadMatchedLinkedinPdf(profile, sourceTabId) {
   const current = indeedLookupFor(profile);
   if (
     profile?.source !== "linkedin" || !candidateId || current.resume ||
-    current.status !== "found" || !linkedinSlug(profile.source_url || "")
+    !hasCompleteIndeedContact(current) || !linkedinSlug(profile.source_url || "")
   ) return false;
   if (await hydrateStoredResume(profile)) return true;
 
@@ -3793,6 +3802,8 @@ function startIndeedResumeBatch(profiles) {
           updateSourceHeaderProgressUi();
           break;
         }
+        // Keep capture, server-side cover creation, and local save in this
+        // awaited loop: the next candidate must not start until this one ends.
         const saved = await downloadMatchedIndeedResume(profile);
         indeedResumeBatchState.processed += 1;
         if (saved) indeedResumeBatchState.saved += 1;
@@ -4049,9 +4060,14 @@ async function showSmsComposer(candidateId, candidateName, phone) {
     api(`/candidates/${candidateId}/sms-consent?phone=${encodeURIComponent(phone)}`),
   ]);
   const consent = consentResult.consent;
+  const phoneConsent = consentResult.phone_consent || consent;
+  const phoneControl = consentResult.phone_control || null;
   const testModeBypass = consentResult.test_mode_bypass === true;
-  const optInPending = consentResult.opt_in_pending === true;
-  const permitted = consent?.status === "opted_in" || testModeBypass;
+  const optedOut = phoneControl?.state === "opted_out";
+  const optInPending = consentResult.opt_in_pending === true ||
+    ["sending", "pending"].includes(phoneControl?.state);
+  const permitted = (phoneConsent?.status === "opted_in" ||
+    phoneControl?.state === "opted_in" || testModeBypass) && !optedOut;
   const firstName = String(candidateName || "there").trim().split(/\s+/)[0] || "there";
   const optInMessage = `Hi ${firstName}, I'm from Radixsol. We'd like to contact you by text about job opportunities that match your experience. Reply START to opt in to SMS messages from ABC Recruiting. Msg & data rates may apply. Reply STOP to opt out, HELP for help.`;
   const defaultMessage = `Hi ${firstName}, this is the recruiting team at Medhunt. Would you be open to hearing about a relevant opportunity?`;
@@ -4061,12 +4077,13 @@ async function showSmsComposer(candidateId, candidateName, phone) {
       <h3 id="smsTitle">Message ${escapeHtml(candidateName || "candidate")}</h3>
       <p class="muted small">Verified mobile: ${escapeHtml(phone)}</p>
       ${!status.enabled ? `<div class="notice error">Zoom Phone SMS is not configured on the Medhunt server.</div>` : ""}
-      ${testModeBypass ? `<div class="notice warning"><strong>Test mode:</strong> this exact allowlisted test number can be messaged without a permission record. Do not use candidate numbers here.</div>` : permitted ? `<div class="sms-consent-state ready">Documented permission on file · ${escapeHtml(consent.source)}</div>` : `
+      ${optedOut ? `<div class="notice error"><strong>Opted out.</strong> This phone number replied STOP (or another opt-out keyword). No further SMS can be sent.</div>` : ""}
+      ${!optedOut && testModeBypass ? `<div class="notice warning"><strong>Test mode:</strong> this exact allowlisted test number can be messaged without a permission record. Do not use candidate numbers here.</div>` : permitted ? `<div class="sms-consent-state ready">Documented permission on file · ${escapeHtml(phoneConsent?.source || "candidate SMS opt-in")}</div>` : `
         <div class="sms-consent-panel">
           <strong>${optInPending ? "Waiting for candidate opt-in" : "SMS permission required"}</strong>
           <p class="muted small">${optInPending ? "The opt-in request was sent. The recruiting message unlocks automatically after the candidate replies START or YES." : "Send this opt-in request before any recruiting texts. Public profile data alone is not permission."}</p>
           <p class="sms-opt-in-preview">${escapeHtml(optInMessage)}</p>
-          <button type="button" class="btn teal" data-action="request-sms-opt-in"${status.enabled && !optInPending ? "" : " disabled"}>${optInPending ? "Opt-in request sent" : "Send opt-in text with Zoom Phone"}</button>
+          <button type="button" class="btn teal" data-action="request-sms-opt-in"${status.enabled && !optInPending && phoneControl?.state !== "failed" && !optedOut ? "" : " disabled"}>${optInPending ? "Opt-in request already sent" : phoneControl?.state === "failed" ? "Request status needs review" : "Send opt-in text with Zoom Phone"}</button>
           <label class="field-label" for="smsConsentSource">Permission source</label>
           <select id="smsConsentSource">
             <option value="application">Job application</option>
@@ -4163,7 +4180,7 @@ async function viewMessages() {
     const data = await api("/messaging/conversations");
     const items = data.items || [];
     $("#content").innerHTML = `<div class="card messages-card">
-      <div class="row spread"><div><h3>Candidate conversations</h3><p class="muted small">Replies can be assigned to a Healthboard recruiter.</p></div><span class="pill live">${items.length}</span></div>
+      <div class="row spread"><div><h3>Candidate conversations</h3><p class="muted small">Review and assign replies in Halo.</p></div><span class="pill live">${items.length}</span></div>
       <div class="conversation-list">
         ${items.length ? items.map((item) => `<button type="button" class="conversation-row" data-action="open-conversation" data-conversation-id="${Number(item.id)}">
           <span><strong>${escapeHtml(item.candidate_name || `Candidate ${item.candidate_id}`)}</strong><small>${escapeHtml(item.candidate_phone || "")}</small></span>
@@ -4177,36 +4194,17 @@ async function viewMessages() {
 }
 
 async function openConversation(conversationId) {
-  const [conversation, recruiters] = await Promise.all([
-    api(`/messaging/conversations/${conversationId}`),
-    api("/messaging/recruiters").catch(() => ({ items: [] })),
-  ]);
-  const items = recruiters.items || [];
+  const conversation = await api(`/messaging/conversations/${conversationId}`);
   $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
     <section class="sheet sms-sheet" role="dialog" aria-modal="true" aria-labelledby="conversationTitle">
       <h3 id="conversationTitle">${escapeHtml(conversation.candidate_name || "Candidate conversation")}</h3>
       <div class="message-thread">${(conversation.messages || []).map((message) => `<div class="message-bubble ${message.direction === "inbound" ? "inbound" : "outbound"}"><span>${escapeHtml(message.body)}</span><small>${escapeHtml(message.status || "")}</small></div>`).join("")}</div>
-      <label class="field-label" for="conversationRecruiter">Assign reply</label>
-      <select id="conversationRecruiter"><option value="">Choose recruiter</option>${items.map((item) => `<option value="${escapeHtml(item.user_id)}">${escapeHtml(item.name || item.email || item.user_id)}</option>`).join("")}</select>
+      <p class="muted small">Recruiter assignment is managed in Halo.</p>
       <div class="row modal-actions">
         <button type="button" class="btn ghost" data-action="close-modal">Close</button>
-        <button type="button" class="btn teal" data-action="assign-conversation" data-conversation-id="${Number(conversation.id)}"${items.length ? "" : " disabled"}>Assign in Healthboard</button>
       </div>
     </section>
   </div>`;
-}
-
-async function assignConversation(conversationId) {
-  const recruiter = $("#conversationRecruiter")?.value || "";
-  if (!recruiter) throw new Error("Choose a recruiter.");
-  await api(`/messaging/conversations/${conversationId}/assign`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ recruiter_user_id: recruiter }),
-  });
-  closeModal();
-  notify("Conversation assigned in Healthboard.");
-  if (activeView === "messages") await viewMessages();
 }
 
 async function viewPipeline() {
@@ -4419,7 +4417,6 @@ document.addEventListener("click", async (event) => {
     "request-login-code": requestLoginCode,
     "verify-login-code": verifyLoginCode,
     "check-device-approval": checkDeviceApproval,
-    "approve-device": () => approveDevice(button),
     "revoke-device": () => revokeDevice(button),
     "logout": logout,
     "open-privacy": openPrivacyNotice,
@@ -4468,7 +4465,6 @@ document.addEventListener("click", async (event) => {
     "request-sms-opt-in": requestSmsOptIn,
     "send-sms": sendCandidateSms,
     "open-conversation": () => openConversation(Number(button.dataset.conversationId)),
-    "assign-conversation": () => assignConversation(Number(button.dataset.conversationId)),
     "approve-draft": () => approveDraft(id),
     "copy-draft": copyDraft,
     "add-dnc": addDnc,

@@ -82,7 +82,12 @@ CREATE TABLE IF NOT EXISTS sms_messages(
   zoom_message_id TEXT DEFAULT '', request_id TEXT UNIQUE,
   failure_reason TEXT DEFAULT '', created REAL, updated REAL);
 CREATE TABLE IF NOT EXISTS sms_webhook_events(
-  event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL, created REAL);
+  event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL, created REAL,
+  processed INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS sms_phone_controls(
+  phone_key TEXT PRIMARY KEY, candidate_id INTEGER NOT NULL,
+  conversation_id INTEGER, state TEXT NOT NULL, request_id TEXT DEFAULT '',
+  created REAL NOT NULL, updated REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS talent_pools(
   id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL,
   created REAL, updated REAL);
@@ -341,7 +346,13 @@ _POSTGRES_SCHEMA = (
        )""",
     """CREATE TABLE IF NOT EXISTS sms_webhook_events(
          event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL,
-         created DOUBLE PRECISION
+         created DOUBLE PRECISION, processed INTEGER DEFAULT 0
+       )""",
+    """CREATE TABLE IF NOT EXISTS sms_phone_controls(
+         phone_key TEXT PRIMARY KEY, candidate_id BIGINT NOT NULL,
+         conversation_id BIGINT, state TEXT NOT NULL,
+         request_id TEXT DEFAULT '', created DOUBLE PRECISION NOT NULL,
+         updated DOUBLE PRECISION NOT NULL
        )""",
     # Older deployments may already contain one or more of these tables from
     # before candidate-level attribution was added. CREATE TABLE IF NOT EXISTS
@@ -351,6 +362,7 @@ _POSTGRES_SCHEMA = (
     # candidate id.
     "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS halo_status TEXT DEFAULT 'delivered'",
+    "ALTER TABLE sms_webhook_events ADD COLUMN IF NOT EXISTS processed INTEGER DEFAULT 0",
     "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT ''",
     "ALTER TABLE outreach ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE talent_pool_members ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
@@ -442,9 +454,11 @@ _POSTGRES_REQUIRED_TABLES = (
     "nexus_candidate_links", "resume_capture_locks", "nexus_deliveries",
     "watcher_email_deliveries",
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
+    "sms_phone_controls",
 )
 _POSTGRES_REQUIRED_COLUMNS = {
     "enrichment_events": ("candidate_id", "halo_status", "platform"),
+    "sms_webhook_events": ("processed",),
     "outreach": ("candidate_id",),
     "talent_pool_members": ("candidate_id",),
     "campaign_members": ("candidate_id",),
@@ -653,6 +667,9 @@ def _conn():
             raw.execute("ALTER TABLE enrichment_events ADD COLUMN platform TEXT DEFAULT ''")
         raw.execute("CREATE INDEX IF NOT EXISTS idx_enrichment_events_halo "
                     "ON enrichment_events(halo_status, id)")
+        webhook_columns = {row["name"] for row in raw.execute("PRAGMA table_info(sms_webhook_events)")}
+        if "processed" not in webhook_columns:
+            raw.execute("ALTER TABLE sms_webhook_events ADD COLUMN processed INTEGER DEFAULT 0")
         resume_columns = {row["name"] for row in raw.execute("PRAGMA table_info(resumes)")}
         for name, definition in (
             ("storage_provider", "TEXT DEFAULT 'database'"),
@@ -2643,15 +2660,156 @@ def record_sms_consent(candidate_id, phone, status, source, evidence,
                    ON CONFLICT(value) DO NOTHING""",
                 (key, "SMS opt-out", now),
             )
+            connection.execute(
+                """INSERT INTO sms_phone_controls(
+                     phone_key,candidate_id,state,created,updated
+                   ) VALUES(?,?,'opted_out',?,?)
+                   ON CONFLICT(phone_key) DO UPDATE SET state='opted_out',updated=excluded.updated""",
+                (key, int(candidate_id), now, now),
+            )
         elif source_value == "inbound_sms" and str(captured_by or "") == "zoom":
             # Only an authenticated inbound carrier event may reverse a prior
             # SMS suppression. Manually entered records never clear DNC.
             connection.execute("DELETE FROM dnc WHERE value=?", (key,))
+            connection.execute(
+                """INSERT INTO sms_phone_controls(
+                     phone_key,candidate_id,state,created,updated
+                   ) VALUES(?,?,'opted_in',?,?)
+                   ON CONFLICT(phone_key) DO UPDATE SET state='opted_in',updated=excluded.updated""",
+                (key, int(candidate_id), now, now),
+            )
+        elif normalized_status == "opted_in":
+            # A documented permission record for any duplicate candidate record
+            # applies to the phone, while the evidence remains candidate-scoped.
+            suppressed = connection.execute(
+                "SELECT 1 FROM dnc WHERE value=?", (key,),
+            ).fetchone()
+            phone_state = "opted_out" if suppressed else "opted_in"
+            connection.execute(
+                """INSERT INTO sms_phone_controls(
+                     phone_key,candidate_id,state,created,updated
+                   ) VALUES(?,?,?,?,?)
+                   ON CONFLICT(phone_key) DO UPDATE SET state=excluded.state,updated=excluded.updated""",
+                (key, int(candidate_id), phone_state, now, now),
+            )
         row = connection.execute(
             "SELECT * FROM sms_consents WHERE candidate_id=? AND phone_key=?",
             (int(candidate_id), key),
         ).fetchone()
         return dict(row)
+
+
+def get_sms_phone_control(phone):
+    key = contact_key(phone)
+    if not key:
+        return None
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT * FROM sms_phone_controls WHERE phone_key=?", (key,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def claim_sms_opt_in(phone, candidate_id, *, candidate_name="", initiated_by="",
+                     sender_number="", request_id=""):
+    """Atomically claim the one-per-phone opt-in request and conversation.
+
+    A claim is intentionally retained after a provider error: the request may
+    have reached the carrier despite a timeout, so retrying automatically could
+    send a duplicate. Admins can reconcile that state before any manual retry.
+    """
+    phone_value = str(phone or "").strip()
+    key = contact_key(phone_value)
+    if not key:
+        raise ValueError("A valid phone number is required")
+    now = time.time()
+    with _conn() as connection:
+        cursor = connection.execute(
+            """INSERT INTO sms_phone_controls(
+                 phone_key,candidate_id,state,request_id,created,updated
+               ) VALUES(?,?,'sending',?,?,?) ON CONFLICT(phone_key) DO NOTHING""",
+            (key, int(candidate_id), str(request_id or "")[:200], now, now),
+        )
+        created = cursor.rowcount > 0
+        control = connection.execute(
+            "SELECT * FROM sms_phone_controls WHERE phone_key=?", (key,),
+        ).fetchone()
+        if not created:
+            row = dict(control) if control else None
+            conversation = None
+            if row and row.get("conversation_id"):
+                found = connection.execute(
+                    "SELECT * FROM sms_conversations WHERE id=?",
+                    (row["conversation_id"],),
+                ).fetchone()
+                conversation = dict(found) if found else None
+            return {"created": False, "control": row, "conversation": conversation}
+        existing = connection.execute(
+            "SELECT * FROM sms_conversations WHERE phone_key=? ORDER BY updated DESC LIMIT 1",
+            (key,),
+        ).fetchone()
+        if existing:
+            prior_opt_in = connection.execute(
+                """SELECT 1 FROM sms_messages WHERE conversation_id=?
+                   AND direction='outbound' AND body LIKE '%Reply START to opt in%'
+                   LIMIT 1""", (int(existing["id"]),),
+            ).fetchone()
+            if prior_opt_in:
+                connection.execute(
+                    """UPDATE sms_phone_controls SET conversation_id=?,state='pending',updated=?
+                       WHERE phone_key=?""", (int(existing["id"]), now, key),
+                )
+                control = connection.execute(
+                    "SELECT * FROM sms_phone_controls WHERE phone_key=?", (key,),
+                ).fetchone()
+                return {"created": False, "control": dict(control),
+                        "conversation": dict(existing)}
+        if existing:
+            conversation_id = int(existing["id"])
+        else:
+            conversation_id = _insert_id(
+                connection,
+                """INSERT INTO sms_conversations(
+                     candidate_id,nexus_candidate_id,candidate_name,candidate_phone,phone_key,
+                     initiated_by,zoom_sender_number,status,created,updated,last_message_at
+                   ) VALUES(?,?,?,?,?,?,?,'open',?,?,?)""",
+                (int(candidate_id), candidate_nexus_id(candidate_id),
+                 str(candidate_name or "")[:320], phone_value, key,
+                 str(initiated_by or "")[:320], str(sender_number or "")[:50],
+                 now, now, now),
+            )
+        connection.execute(
+            """UPDATE sms_phone_controls SET conversation_id=?,updated=?
+               WHERE phone_key=?""", (conversation_id, now, key),
+        )
+        conversation = connection.execute(
+            "SELECT * FROM sms_conversations WHERE id=?", (conversation_id,),
+        ).fetchone()
+        control = connection.execute(
+            "SELECT * FROM sms_phone_controls WHERE phone_key=?", (key,),
+        ).fetchone()
+        return {"created": True, "control": dict(control),
+                "conversation": dict(conversation) if conversation else None}
+
+
+def update_sms_phone_control(phone, state, *, request_id=None):
+    key = contact_key(phone)
+    if not key:
+        return None
+    now = time.time()
+    with _conn() as connection:
+        if request_id is None:
+            connection.execute(
+                "UPDATE sms_phone_controls SET state=?,updated=? WHERE phone_key=?",
+                (str(state), now, key),
+            )
+        else:
+            connection.execute(
+                """UPDATE sms_phone_controls SET state=?,request_id=?,updated=?
+                   WHERE phone_key=?""",
+                (str(state), str(request_id or "")[:200], now, key),
+            )
+    return get_sms_phone_control(phone)
 
 
 def get_sms_consent(candidate_id, phone):
@@ -2662,6 +2820,18 @@ def get_sms_consent(candidate_id, phone):
         row = connection.execute(
             "SELECT * FROM sms_consents WHERE candidate_id=? AND phone_key=?",
             (int(candidate_id), key),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_sms_phone_consent(phone):
+    key = contact_key(phone)
+    if not key:
+        return None
+    with _conn() as connection:
+        row = connection.execute(
+            """SELECT * FROM sms_consents WHERE phone_key=?
+               ORDER BY updated DESC LIMIT 1""", (key,),
         ).fetchone()
         return dict(row) if row else None
 
@@ -2783,16 +2953,21 @@ def get_sms_conversation(conversation_id):
 
 
 def list_sms_conversations(user_id="", *, include_all=False):
+    projection = """SELECT c.*,
+        EXISTS(SELECT 1 FROM sms_messages m WHERE m.conversation_id=c.id
+               AND m.direction='inbound') AS has_reply,
+        (SELECT MAX(m.created) FROM sms_messages m WHERE m.conversation_id=c.id
+         AND m.direction='inbound') AS last_reply_at
+        FROM sms_conversations c"""
     with _conn() as connection:
         if include_all or not user_id:
             rows = connection.execute(
-                "SELECT * FROM sms_conversations ORDER BY updated DESC"
+                projection + " ORDER BY c.updated DESC"
             ).fetchall()
         else:
             rows = connection.execute(
-                """SELECT * FROM sms_conversations
-                   WHERE initiated_by=? OR assigned_recruiter_id=?
-                   ORDER BY updated DESC""",
+                projection + " WHERE c.initiated_by=? OR c.assigned_recruiter_id=?"
+                " ORDER BY c.updated DESC",
                 (str(user_id), str(user_id)),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -2800,12 +2975,24 @@ def list_sms_conversations(user_id="", *, include_all=False):
 
 def claim_sms_webhook(event_key, event_type):
     with _conn() as connection:
-        cursor = connection.execute(
+        connection.execute(
             """INSERT INTO sms_webhook_events(event_key,event_type,created)
                VALUES(?,?,?) ON CONFLICT(event_key) DO NOTHING""",
             (str(event_key), str(event_type), time.time()),
         )
-        return cursor.rowcount > 0
+        row = connection.execute(
+            "SELECT processed FROM sms_webhook_events WHERE event_key=?",
+            (str(event_key),),
+        ).fetchone()
+        return bool(row and not row["processed"])
+
+
+def complete_sms_webhook(event_key):
+    with _conn() as connection:
+        connection.execute(
+            "UPDATE sms_webhook_events SET processed=1 WHERE event_key=?",
+            (str(event_key),),
+        )
 
 
 def find_sms_conversation(*, session_id="", phone=""):
@@ -2816,6 +3003,18 @@ def find_sms_conversation(*, session_id="", phone=""):
                    ORDER BY updated DESC LIMIT 1""", (str(session_id),)
             ).fetchone()
         else:
+            control = connection.execute(
+                "SELECT conversation_id FROM sms_phone_controls WHERE phone_key=?",
+                (contact_key(phone),),
+            ).fetchone()
+            row = None
+            if control and control["conversation_id"]:
+                row = connection.execute(
+                    "SELECT * FROM sms_conversations WHERE id=?",
+                    (control["conversation_id"],),
+                ).fetchone()
+            if row:
+                return dict(row)
             row = connection.execute(
                 """SELECT * FROM sms_conversations WHERE phone_key=?
                    ORDER BY updated DESC LIMIT 1""", (contact_key(phone),)
@@ -3118,9 +3317,8 @@ def register_extension_device(user_id: str, installation_id: str, *,
                               device_name: str = "", user_agent: str = "") -> dict:
     """Register a device after a successful Healthcareboard email challenge.
 
-    The first device is approved automatically. Later devices stay pending
-    until an already-approved device for the same user or an administrator
-    approves them. A manually revoked installation never self-reactivates.
+    Every non-revoked installation is approved after the email challenge.
+    A manually revoked installation never self-reactivates.
     """
     subject = str(user_id or "").strip()[:255]
     device = str(installation_id or "").strip()[:100]
@@ -3160,15 +3358,10 @@ def register_extension_device(user_id: str, installation_id: str, *,
                    WHERE user_id=? AND installation_id=?""",
                 (subject, device),
             ).fetchone()
-            approved_count = int(_scalar(connection.execute(
-                """SELECT COUNT(*) FROM extension_device_registrations
-                   WHERE user_id=? AND status='approved'""",
-                (subject,),
-            )) or 0)
             if row:
                 current = dict(row)
                 status = str(current.get("status") or "pending")
-                if status == "expired" and approved_count < config.MEDHUNT_MAX_REGISTERED_DEVICES:
+                if status in {"expired", "pending", "revoked"}:
                     status = "approved"
                     connection.execute(
                         """UPDATE extension_device_registrations SET
@@ -3178,27 +3371,10 @@ def register_extension_device(user_id: str, installation_id: str, *,
                         (name, agent, now, subject, now, current["id"]),
                     )
                     _device_event(
-                        connection, subject, device, "reauthorized",
+                        connection, subject, device, "device_auto_approved",
                         actor_user_id=subject,
                     )
-                elif status == "revoked":
-                    # A fresh email-code challenge is required before a
-                    # revoked browser can ask for approval again. It cannot
-                    # regain access until an already-approved device/admin
-                    # reviews the new request.
-                    status = "pending"
-                    connection.execute(
-                        """UPDATE extension_device_registrations SET
-                             status='pending',device_name=?,user_agent=?,requested_at=?,
-                             approved_at=0,approved_by='',last_seen=?,revoked_at=0
-                           WHERE id=?""",
-                        (name, agent, now, now, current["id"]),
-                    )
-                    _device_event(
-                        connection, subject, device, "approval_requested_after_revoke",
-                        actor_user_id=subject,
-                    )
-                elif status != "revoked":
+                else:
                     connection.execute(
                         """UPDATE extension_device_registrations
                            SET device_name=?,user_agent=?,last_seen=? WHERE id=?""",
@@ -3210,9 +3386,9 @@ def register_extension_device(user_id: str, installation_id: str, *,
                 ).fetchone()
                 return _device_row(row, current_installation_id=device)
 
-            status = "approved" if approved_count == 0 else "pending"
-            approved_at = now if status == "approved" else 0
-            approved_by = subject if status == "approved" else ""
+            status = "approved"
+            approved_at = now
+            approved_by = subject
             row = connection.execute(
                 """INSERT INTO extension_device_registrations(
                      user_id,installation_id,device_name,user_agent,status,
@@ -3225,7 +3401,7 @@ def register_extension_device(user_id: str, installation_id: str, *,
             ).fetchone()
             _device_event(
                 connection, subject, device,
-                "first_device_approved" if status == "approved" else "approval_requested",
+                "device_registered",
                 actor_user_id=subject,
             )
     return _device_row(row, current_installation_id=device)
@@ -3297,6 +3473,29 @@ def authorize_extension_device(user_id: str, installation_id: str) -> dict | Non
                 )
                 data = dict(row)
             data = dict(row)
+            if data.get("status") in {"pending", "revoked"}:
+                # Existing sessions from before automatic device approval may
+                # already have a pending registration. Let the authenticated
+                # user continue without waiting for an administrator.
+                last_event = connection.execute(
+                    """SELECT event_type FROM extension_device_events
+                       WHERE user_id=? AND installation_id=?
+                       ORDER BY created DESC,id DESC LIMIT 1""",
+                    (subject, device),
+                ).fetchone()
+                connection.execute(
+                    """UPDATE extension_device_registrations SET
+                         status='approved',approved_at=?,approved_by=?,last_seen=?,
+                         revoked_at=0,revocation_reason=''
+                       WHERE id=?""",
+                    (now, subject, now, data["id"]),
+                )
+                _device_event(
+                    connection, subject, device, "device_auto_approved",
+                    actor_user_id=subject,
+                )
+                data.update({"status": "approved", "approved_at": now,
+                             "approved_by": subject, "last_seen": now})
             if data.get("status") != "approved":
                 return _device_row(row, current_installation_id=device)
             last_seen = float(data.get("last_seen") or 0)
@@ -3329,28 +3528,81 @@ def extension_device_status(user_id: str, installation_id: str) -> dict | None:
     return _device_row(row, current_installation_id=device)
 
 
+def auto_approve_pending_extension_device(user_id: str, installation_id: str) -> dict | None:
+    """Release legacy pending installs after a successful email-code sign-in.
+
+    Existing installations no longer need an approval step.
+    """
+    subject = str(user_id or "").strip()[:255]
+    device = str(installation_id or "").strip()[:100]
+    if not subject or not device:
+        return None
+    now = time.time()
+    with _conn() as connection:
+        with connection.transaction():
+            row = connection.execute(
+                """SELECT * FROM extension_device_registrations
+                   WHERE user_id=? AND installation_id=?""",
+                (subject, device),
+            ).fetchone()
+            if not row or row["status"] not in {"pending", "revoked"}:
+                return _device_row(row, current_installation_id=device)
+            connection.execute(
+                """UPDATE extension_device_registrations SET
+                     status='approved',approved_at=?,approved_by=?,last_seen=?,
+                     revoked_at=0,revocation_reason=''
+                   WHERE id=?""",
+                (now, subject, now, row["id"]),
+            )
+            _device_event(
+                connection, subject, device, "device_auto_approved",
+                actor_user_id=subject,
+            )
+            approved = connection.execute(
+                "SELECT * FROM extension_device_registrations WHERE id=?",
+                (row["id"],),
+            ).fetchone()
+    return _device_row(approved, current_installation_id=device)
+
+
 def list_extension_devices(user_id: str, *, current_installation_id: str = "",
-                           include_pending_for_all_users: bool = False) -> list[dict]:
+                           include_all_users: bool = False) -> list[dict]:
     subject = str(user_id or "").strip()[:255]
     with _conn() as connection:
-        if include_pending_for_all_users:
+        if include_all_users:
             rows = connection.execute(
-                """SELECT d.* FROM extension_device_registrations d
-                   WHERE d.user_id=? OR d.status IN ('pending','expired')
-                   ORDER BY CASE WHEN d.user_id=? THEN 0 ELSE 1 END,d.requested_at DESC
-                   LIMIT 200""",
-                (subject, subject),
+                """SELECT d.*,u.email AS user_email,u.name AS user_name
+                   FROM extension_device_registrations d
+                   LEFT JOIN users u ON u.auth0_sub=d.user_id
+                   ORDER BY d.user_id,d.requested_at DESC""",
             ).fetchall()
         else:
             rows = connection.execute(
-                """SELECT d.* FROM extension_device_registrations d
+                """SELECT d.*,u.email AS user_email,u.name AS user_name
+                   FROM extension_device_registrations d
+                   LEFT JOIN users u ON u.auth0_sub=d.user_id
                    WHERE d.user_id=? ORDER BY d.requested_at DESC""",
                 (subject,),
             ).fetchall()
-    return [
+    devices = [
         _device_row(row, current_installation_id=current_installation_id)
         for row in rows
     ]
+    counts: dict[str, int] = {}
+    approved_counts: dict[str, int] = {}
+    for device in devices:
+        owner = str(device.get("user_id") or "")
+        counts[owner] = counts.get(owner, 0) + 1
+        if device.get("status") == "approved":
+            approved_counts[owner] = approved_counts.get(owner, 0) + 1
+    for device in devices:
+        device["registered_device_count"] = counts.get(
+            str(device.get("user_id") or ""), 0,
+        )
+        device["approved_device_count"] = approved_counts.get(
+            str(device.get("user_id") or ""), 0,
+        )
+    return devices
 
 
 def approve_extension_device(device_id: int, *, actor_user_id: str,
@@ -3369,15 +3621,6 @@ def approve_extension_device(device_id: int, *, actor_user_id: str,
                 raise PermissionError("Only a Healthcareboard administrator can approve devices")
             if target.get("status") == "revoked":
                 raise ValueError("A revoked device cannot be approved; request access again from a new installation")
-            approved_count = int(_scalar(connection.execute(
-                """SELECT COUNT(*) FROM extension_device_registrations
-                   WHERE user_id=? AND status='approved' AND id<>?""",
-                (target["user_id"], int(device_id)),
-            )) or 0)
-            if approved_count >= config.MEDHUNT_MAX_REGISTERED_DEVICES:
-                raise ValueError(
-                    f"This account already has {config.MEDHUNT_MAX_REGISTERED_DEVICES} approved devices"
-                )
             now = time.time()
             connection.execute(
                 """UPDATE extension_device_registrations SET

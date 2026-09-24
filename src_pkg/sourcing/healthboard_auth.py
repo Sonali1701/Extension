@@ -169,4 +169,5 @@ def report_message_event(*, event_id: str, conversation: dict, event_type: str,
         timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
     )
     response.raise_for_status()
-    return bool(response.json().get("recorded", True))
+    # An idempotent duplicate is already safely present in Halo.
+    return True

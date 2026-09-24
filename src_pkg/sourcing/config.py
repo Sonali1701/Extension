@@ -96,14 +96,24 @@ if IS_FROZEN and not re.fullmatch(r"[A-Za-z0-9_-]{40,128}", LOCAL_API_TOKEN):
 # an email and verification code; this backend validates HealthBoard's opaque,
 # limited extension token and reports enrichment activity to its analytics.
 HEALTHBOARD_BASE_URL = os.getenv("HEALTHBOARD_BASE_URL", "").strip().rstrip("/")
+MEDHUNT_MAIN_WEBSITE_URL = os.getenv(
+    "MEDHUNT_MAIN_WEBSITE_URL", "https://medhunt.ai/"
+).strip()
 HEALTHBOARD_AUTH_TIMEOUT = max(
     2.0, min(30.0, float(os.getenv("HEALTHBOARD_AUTH_TIMEOUT", "8")))
 )
 HEALTHBOARD_AUTH_CACHE_SECONDS = max(
     0, min(300, int(os.getenv("HEALTHBOARD_AUTH_CACHE_SECONDS", "60")))
 )
+# Retained for deployments that still set this variable; device registration
+# no longer blocks sign-in based on a device count.
 MEDHUNT_MAX_REGISTERED_DEVICES = max(
     1, min(5, int(os.getenv("MEDHUNT_MAX_REGISTERED_DEVICES", "2")))
+)
+MEDHUNT_ADMIN_EMAILS = frozenset(
+    email.strip().casefold()
+    for email in re.split(r"[,;]", os.getenv("MEDHUNT_ADMIN_EMAILS", ""))
+    if email.strip()
 )
 MEDHUNT_DEVICE_IDLE_DAYS = max(
     7, min(365, int(os.getenv("MEDHUNT_DEVICE_IDLE_DAYS", "90")))
