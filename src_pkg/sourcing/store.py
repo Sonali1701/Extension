@@ -39,7 +39,8 @@ CREATE TABLE IF NOT EXISTS extension_device_events(
 CREATE TABLE IF NOT EXISTS enrichment_events(
   id INTEGER PRIMARY KEY AUTOINCREMENT, auth0_sub TEXT NOT NULL,
   candidate_id INTEGER NOT NULL, status TEXT NOT NULL, provider TEXT DEFAULT '',
-  run_id TEXT DEFAULT '', created REAL NOT NULL);
+  run_id TEXT DEFAULT '', platform TEXT DEFAULT '', created REAL NOT NULL,
+  halo_status TEXT DEFAULT 'delivered');
 CREATE TABLE IF NOT EXISTS jobs(
   id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT, location TEXT,
   description TEXT, created REAL);
@@ -205,8 +206,9 @@ _POSTGRES_SCHEMA = (
     """CREATE TABLE IF NOT EXISTS enrichment_events(
          id BIGSERIAL PRIMARY KEY, auth0_sub TEXT NOT NULL,
          candidate_id BIGINT NOT NULL, status TEXT NOT NULL,
-         provider TEXT DEFAULT '', run_id TEXT DEFAULT '',
-         created DOUBLE PRECISION NOT NULL
+         provider TEXT DEFAULT '', run_id TEXT DEFAULT '', platform TEXT DEFAULT '',
+         created DOUBLE PRECISION NOT NULL,
+         halo_status TEXT DEFAULT 'delivered'
        )""",
     """CREATE TABLE IF NOT EXISTS jobs(
          id BIGSERIAL PRIMARY KEY, title TEXT, location TEXT,
@@ -348,6 +350,8 @@ _POSTGRES_SCHEMA = (
     # nullable so historical rows are preserved; all current writes supply the
     # candidate id.
     "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
+    "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS halo_status TEXT DEFAULT 'delivered'",
+    "ALTER TABLE enrichment_events ADD COLUMN IF NOT EXISTS platform TEXT DEFAULT ''",
     "ALTER TABLE outreach ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE talent_pool_members ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
     "ALTER TABLE campaign_members ADD COLUMN IF NOT EXISTS candidate_id BIGINT",
@@ -382,6 +386,7 @@ _POSTGRES_SCHEMA = (
     "CREATE INDEX IF NOT EXISTS idx_candidates_source ON candidates(source, source_id)",
     "CREATE INDEX IF NOT EXISTS idx_enrichment_events_user ON enrichment_events(auth0_sub, created)",
     "CREATE INDEX IF NOT EXISTS idx_enrichment_events_candidate ON enrichment_events(candidate_id, created)",
+    "CREATE INDEX IF NOT EXISTS idx_enrichment_events_halo ON enrichment_events(halo_status, id)",
     "CREATE INDEX IF NOT EXISTS idx_candidates_provider_person ON candidates(provider_person_id)",
     "CREATE INDEX IF NOT EXISTS idx_candidates_master ON candidates(master_candidate_id)",
     "CREATE INDEX IF NOT EXISTS idx_pool_members_candidate ON talent_pool_members(candidate_id)",
@@ -439,7 +444,7 @@ _POSTGRES_REQUIRED_TABLES = (
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
 )
 _POSTGRES_REQUIRED_COLUMNS = {
-    "enrichment_events": ("candidate_id",),
+    "enrichment_events": ("candidate_id", "halo_status", "platform"),
     "outreach": ("candidate_id",),
     "talent_pool_members": ("candidate_id",),
     "campaign_members": ("candidate_id",),
@@ -462,7 +467,7 @@ _POSTGRES_REQUIRED_COLUMNS = {
     "nexus_deliveries": ("candidate_id",),
 }
 _POSTGRES_REQUIRED_INDEXES = (
-    "idx_enrichment_events_user", "idx_enrichment_events_candidate",
+    "idx_enrichment_events_user", "idx_enrichment_events_candidate", "idx_enrichment_events_halo",
     "idx_candidates_source", "idx_candidates_provider_person",
     "idx_candidates_master", "idx_pool_members_candidate",
     "idx_campaign_members_candidate", "idx_resumes_candidate",
@@ -641,6 +646,13 @@ def _conn():
         ):
             if name not in columns:
                 raw.execute(f"ALTER TABLE candidates ADD COLUMN {name} {definition}")
+        event_columns = {row["name"] for row in raw.execute("PRAGMA table_info(enrichment_events)")}
+        if "halo_status" not in event_columns:
+            raw.execute("ALTER TABLE enrichment_events ADD COLUMN halo_status TEXT DEFAULT 'delivered'")
+        if "platform" not in event_columns:
+            raw.execute("ALTER TABLE enrichment_events ADD COLUMN platform TEXT DEFAULT ''")
+        raw.execute("CREATE INDEX IF NOT EXISTS idx_enrichment_events_halo "
+                    "ON enrichment_events(halo_status, id)")
         resume_columns = {row["name"] for row in raw.execute("PRAGMA table_info(resumes)")}
         for name, definition in (
             ("storage_provider", "TEXT DEFAULT 'database'"),
@@ -3417,16 +3429,48 @@ def revoke_extension_device(device_id: int, *, actor_user_id: str,
 
 
 def record_enrichment_event(auth0_sub: str, candidate_id: int, status: str,
-                            *, provider: str = "", run_id: str = "") -> None:
+                            *, provider: str = "", run_id: str = "",
+                            halo_pending: bool = False) -> dict:
     """Attribute one enrichment attempt to the authenticated user."""
     subject = str(auth0_sub or "local").strip()[:255] or "local"
     with _conn() as connection:
-        connection.execute(
+        created = time.time()
+        candidate = connection.execute(
+            "SELECT source FROM candidates WHERE id=?", (int(candidate_id),),
+        ).fetchone()
+        platform = str(candidate["source"] or "").strip().lower()[:80] if candidate else ""
+        event_id = _insert_id(connection,
             """INSERT INTO enrichment_events(
-                 auth0_sub,candidate_id,status,provider,run_id,created
-               ) VALUES(?,?,?,?,?,?)""",
+                 auth0_sub,candidate_id,status,provider,run_id,platform,created,halo_status
+               ) VALUES(?,?,?,?,?,?,?,?)""",
             (subject, int(candidate_id), str(status or "unknown")[:80],
-             str(provider or "")[:80], str(run_id or "")[:120], time.time()),
+             str(provider or "")[:80], str(run_id or "")[:120], platform, created,
+             "pending" if halo_pending else "delivered"),
+        )
+    return {"id": event_id, "auth0_sub": subject, "candidate_id": int(candidate_id),
+            "status": str(status or "unknown")[:80], "provider": str(provider or "")[:80],
+            "run_id": str(run_id or "")[:120], "platform": platform,
+            "created": created}
+
+
+def pending_halo_enrichment_events(limit: int = 50) -> list[dict]:
+    with _conn() as connection:
+        rows = connection.execute(
+            """SELECT e.*
+               FROM enrichment_events e
+               LEFT JOIN candidates c ON c.id=e.candidate_id
+               WHERE e.halo_status='pending'
+               ORDER BY e.id LIMIT ?""",
+            (max(1, min(int(limit), 200)),),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def mark_halo_enrichment_delivered(event_id: int) -> None:
+    with _conn() as connection:
+        connection.execute(
+            "UPDATE enrichment_events SET halo_status='delivered' WHERE id=?",
+            (int(event_id),),
         )
 
 

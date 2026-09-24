@@ -32,7 +32,7 @@ from sourcing import (
     resume_enrichment, contact_access,
     person_name, phone_policy, quick_sourcer_client,
     nexus_delivery, resume_extraction, watcher_notifications, healthboard_auth,
-    profile_resume, zoom_sms,
+    profile_resume, zoom_sms, analytics_delivery,
 )
 
 
@@ -48,9 +48,11 @@ async def lifespan(_app: FastAPI):
             config.NEXUS_DISABLED_REASON,
         )
     nexus_delivery.start()
+    analytics_delivery.start()
     try:
         yield
     finally:
+        analytics_delivery.stop()
         nexus_delivery.stop()
 
 
@@ -1142,27 +1144,18 @@ def _record_enrichment(request: Request | None, candidate_id: int, status: str,
     actor = _request_user(request)
     subject = str(actor.get("sub") or "local")
     normalized_status = str(status or "unknown")
-    store.record_enrichment_event(
-        subject, candidate_id, normalized_status,
-        provider=provider, run_id=run_id,
-    )
     token = str(getattr(
         getattr(request, "state", None), "healthboard_extension_token", "",
     ) or "")
+    event = store.record_enrichment_event(
+        subject, candidate_id, normalized_status,
+        provider=provider, run_id=run_id,
+        halo_pending=bool(token and healthboard_auth.enabled()),
+    )
     if not token or not healthboard_auth.enabled():
         return
-    source = str((store.get_candidate(candidate_id) or {}).get("source") or provider)
-    identity = f"{subject}|{run_id or time.time_ns()}|{candidate_id}|{normalized_status}"
-    event_id = hashlib.sha256(identity.encode()).hexdigest()[:32]
     try:
-        healthboard_auth.report_enrichment(
-            token,
-            event_id=event_id,
-            candidate_id=candidate_id,
-            status=normalized_status,
-            source=source,
-            run_id=run_id,
-        )
+        analytics_delivery.deliver(event, token=token)
     except Exception as exc:
         # The paid/contact result is already complete. Analytics delivery must
         # never discard it; the local event remains available for reconciliation.
@@ -1544,9 +1537,12 @@ def request_sms_opt_in(body: SmsOptInRequestIn, request: Request):
             "already_pending": True,
             "conversation": store.get_sms_conversation(current["id"]),
         }
+    first_name = str(candidate.get("name") or "there").strip().split()[0] or "there"
     text = (
-        "Medhunt Recruiting: Reply START to agree to receive recruiting text "
-        "messages. Message and data rates may apply. Reply STOP to opt out."
+        f"Hi {first_name}, I'm from Radixsol. We'd like to contact you by text "
+        "about job opportunities that match your experience. Reply START to opt "
+        "in to SMS messages from ABC Recruiting. Msg & data rates may apply. "
+        "Reply STOP to opt out, HELP for help."
     )
     conversation = store.get_or_create_sms_conversation(
         body.candidate_id, phone,
@@ -1731,9 +1727,14 @@ async def zoom_webhook(request: Request):
     if event_type == "phone.sms_received":
         text = str(obj.get("message") or "")
         store.create_sms_message(current["id"], "inbound", text, request_id=event_key, status="received")
-        current = store.update_sms_conversation(current["id"], status="replied")
-        store.set_stage(int(current["candidate_id"]), "replied")
         keyword = text.strip().casefold()
+        reply_status = (
+            "awaiting_opt_in"
+            if current.get("status") == "awaiting_opt_in" and keyword in {"help", "info"}
+            else "replied"
+        )
+        current = store.update_sms_conversation(current["id"], status=reply_status)
+        store.set_stage(int(current["candidate_id"]), "replied")
         if keyword in {"stop", "stopall", "unsubscribe", "cancel", "end", "quit"}:
             store.record_sms_consent(
                 int(current["candidate_id"]), current["candidate_phone"], "opted_out",
@@ -1747,6 +1748,29 @@ async def zoom_webhook(request: Request):
                 disclosure_version="medhunt-sms-opt-in-v1",
             )
             current = store.update_sms_conversation(current["id"], status="open")
+        elif keyword in {"help", "info"}:
+            help_text = (
+                "Radixsol Recruiting: Reply START to opt in to SMS about job "
+                "opportunities, or STOP to opt out. Msg & data rates may apply."
+            )
+            help_message, created = store.create_sms_message(
+                current["id"], "outbound", help_text,
+                request_id=f"help:{event_key}",
+            )
+            if created:
+                try:
+                    result = zoom_sms.send_sms(current["candidate_phone"], help_text)
+                    store.update_sms_message(
+                        help_message["id"], status="accepted",
+                        zoom_message_id=str(result.get("message_id") or result.get("id") or ""),
+                    )
+                except zoom_sms.ZoomSmsError as exc:
+                    store.update_sms_message(
+                        help_message["id"], status="failed", failure_reason=str(exc),
+                    )
+                    logging.getLogger("medhunt.sms").warning(
+                        "SMS HELP response failed (%s).", type(exc).__name__,
+                    )
         try:
             healthboard_auth.report_message_event(
                 event_id=event_key, conversation=current, event_type="received",

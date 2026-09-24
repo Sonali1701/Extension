@@ -4051,6 +4051,7 @@ async function showSmsComposer(candidateId, candidateName, phone) {
   const optInPending = consentResult.opt_in_pending === true;
   const permitted = consent?.status === "opted_in" || testModeBypass;
   const firstName = String(candidateName || "there").trim().split(/\s+/)[0] || "there";
+  const optInMessage = `Hi ${firstName}, I'm from Radixsol. We'd like to contact you by text about job opportunities that match your experience. Reply START to opt in to SMS messages from ABC Recruiting. Msg & data rates may apply. Reply STOP to opt out, HELP for help.`;
   const defaultMessage = `Hi ${firstName}, this is the recruiting team at Medhunt. Would you be open to hearing about a relevant opportunity?`;
   $("#modalRoot").innerHTML = `<div class="modal" role="presentation">
     <section class="sheet sms-sheet" role="dialog" aria-modal="true" aria-labelledby="smsTitle">
@@ -4061,8 +4062,9 @@ async function showSmsComposer(candidateId, candidateName, phone) {
       ${testModeBypass ? `<div class="notice warning"><strong>Test mode:</strong> this exact allowlisted test number can be messaged without a permission record. Do not use candidate numbers here.</div>` : permitted ? `<div class="sms-consent-state ready">Documented permission on file · ${escapeHtml(consent.source)}</div>` : `
         <div class="sms-consent-panel">
           <strong>${optInPending ? "Waiting for candidate opt-in" : "SMS permission required"}</strong>
-          <p class="muted small">${optInPending ? "The opt-in request was sent. The recruiting message unlocks automatically after the candidate replies START or YES." : "Send a neutral opt-in request, or record permission already obtained elsewhere. Public profile data alone is not permission."}</p>
-          <button type="button" class="btn teal" data-action="request-sms-opt-in"${status.enabled && !optInPending ? "" : " disabled"}>${optInPending ? "Opt-in request sent" : "Request opt-in with Zoom Phone"}</button>
+          <p class="muted small">${optInPending ? "The opt-in request was sent. The recruiting message unlocks automatically after the candidate replies START or YES." : "Send this opt-in request before any recruiting texts. Public profile data alone is not permission."}</p>
+          <p class="sms-opt-in-preview">${escapeHtml(optInMessage)}</p>
+          <button type="button" class="btn teal" data-action="request-sms-opt-in"${status.enabled && !optInPending ? "" : " disabled"}>${optInPending ? "Opt-in request sent" : "Send opt-in text with Zoom Phone"}</button>
           <label class="field-label" for="smsConsentSource">Permission source</label>
           <select id="smsConsentSource">
             <option value="application">Job application</option>

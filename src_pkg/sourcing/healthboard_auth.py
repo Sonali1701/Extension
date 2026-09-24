@@ -71,7 +71,9 @@ def verify_extension_token(token: str) -> dict:
 
 
 def report_enrichment(token: str, *, event_id: str, candidate_id: int,
-                      status: str, source: str = "", run_id: str = "") -> bool:
+                      status: str, source: str = "", platform: str = "",
+                      provider: str = "", run_id: str = "",
+                      occurred_at: str = "") -> bool:
     response = httpx.post(
         _url("/api/extension/activity/enrichment"),
         headers={"X-Capture-Token": str(token or "").strip()},
@@ -80,12 +82,40 @@ def report_enrichment(token: str, *, event_id: str, candidate_id: int,
             "candidate_id": str(candidate_id),
             "status": status,
             "source": source,
+            "platform": platform,
+            "provider": provider,
             "run_id": run_id,
+            "occurred_at": occurred_at or None,
         },
         timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
     )
     response.raise_for_status()
-    return bool(response.json().get("recorded", True))
+    # A duplicate is an acknowledgement: Halo already has this event, so the
+    # durable outbox can be cleared without replaying it indefinitely.
+    return True
+
+
+def report_enrichment_service(*, user_id: str, event_id: str, candidate_id: int,
+                              status: str, source: str = "", platform: str = "",
+                              provider: str = "", run_id: str = "",
+                              occurred_at: str = "") -> bool:
+    token = config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN
+    if not enabled() or not token:
+        return False
+    response = httpx.post(
+        _url("/api/extension/activity/enrichment/service"),
+        headers={"X-Medhunt-Service-Token": token},
+        json={
+            "user_id": user_id, "event_id": event_id,
+            "candidate_id": str(candidate_id), "status": status,
+            "source": source, "platform": platform,
+            "provider": provider, "run_id": run_id,
+            "occurred_at": occurred_at or None,
+        },
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    return True
 
 
 def list_recruiters(token: str) -> list[dict]:
