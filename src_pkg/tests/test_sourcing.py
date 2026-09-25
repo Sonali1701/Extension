@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
 import pytest
+from starlette.requests import Request
 
 import api as api_module
 from sourcing import (
@@ -4552,6 +4553,8 @@ def test_frontend_locks_captured_candidates_during_lookup():
 
 def test_zoom_sms_requires_documented_consent_and_is_idempotent(monkeypatch):
     store.reset()
+    monkeypatch.setattr(config, "HEALTHBOARD_BASE_URL", "")
+    monkeypatch.setattr(healthboard_auth, "report_message_event", lambda **_kwargs: True)
     candidate_id = store.add_candidate("Taylor Nurse", "Atlanta, GA", source="sharecare")
     quick_sourcer_client.apply_to_candidate(candidate_id, {
         "status": "found",
@@ -4563,9 +4566,10 @@ def test_zoom_sms_requires_documented_consent_and_is_idempotent(monkeypatch):
     })
     monkeypatch.setattr(config, "ZOOM_SMS_ENABLED", True)
     monkeypatch.setattr(config, "ZOOM_SMS_SENDER_NUMBER", "+14045550999")
+    monkeypatch.setattr(config, "ZOOM_SMS_SENDER_USER_ID", "zoom-recruiter-1")
     monkeypatch.setattr(config, "ZOOM_SMS_TEST_MODE", False)
     monkeypatch.setattr(config, "ZOOM_SMS_TEST_NUMBERS", ())
-    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message: {
+    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message, **_kwargs: {
         "message_id": "zoom-message-1", "session_id": "zoom-session-1",
     })
 
@@ -4603,6 +4607,23 @@ def test_zoom_sms_requires_documented_consent_and_is_idempotent(monkeypatch):
             assert repeated.status_code == 200
             assert len(repeated.json()["conversation"]["messages"]) == 1
 
+            # A candidate changing wireless numbers must not bypass the
+            # one-initial-outreach guard or create a second conversation.
+            quick_sourcer_client.apply_to_candidate(candidate_id, {
+                "status": "found", "name": "Taylor Nurse", "source": "test fixture",
+                "emails": [], "phones": [{"value": "+14045550125", "type": "Wireless"}],
+                "addresses": ["Atlanta, GA"],
+            })
+            store.record_sms_consent(
+                candidate_id, "+14045550125", "opted_in", "application",
+                "Application form 2026-09-18", captured_by="test",
+            )
+            changed_number = await client.post("/messaging/sms", json={
+                **body, "phone": "+14045550125", "request_id": "sms-test-request-new-number",
+            })
+            assert changed_number.status_code == 409
+            assert len(store.get_sms_conversation(conversation["id"])["messages"]) == 1
+
             monkeypatch.setattr(config, "ZOOM_WEBHOOK_SECRET_TOKEN", "webhook-secret")
             incoming = {
                 "event": "phone.sms_received", "event_ts": int(time.time() * 1000),
@@ -4636,6 +4657,22 @@ def test_zoom_sms_requires_documented_consent_and_is_idempotent(monkeypatch):
     asyncio.run(exercise())
 
 
+def test_zoom_sms_sender_is_resolved_for_authenticated_extension_user(monkeypatch):
+    request = Request({
+        "type": "http", "method": "GET", "path": "/messaging/status",
+        "headers": [], "client": ("127.0.0.1", 1234),
+        "server": ("testserver", 80), "scheme": "http",
+        "state": {"healthboard_extension_token": "opaque-user-token"},
+    })
+    monkeypatch.setattr(healthboard_auth, "enabled", lambda: True)
+    monkeypatch.setattr(healthboard_auth, "medhunt_sms_sender", lambda token: {
+        "sender_number": "+14155550124", "zoom_user_id": "zoom-user-124",
+    } if token == "opaque-user-token" else {})
+    assert api_module._sms_sender_for_request(request) == (
+        "+14155550124", "zoom-user-124",
+    )
+
+
 def test_zoom_sms_test_mode_only_bypasses_consent_for_allowlisted_number(monkeypatch):
     store.reset()
     allowed_id = store.add_candidate("Owned Test Phone", "Atlanta, GA", source="test")
@@ -4651,10 +4688,11 @@ def test_zoom_sms_test_mode_only_bypasses_consent_for_allowlisted_number(monkeyp
         })
     monkeypatch.setattr(config, "ZOOM_SMS_ENABLED", True)
     monkeypatch.setattr(config, "ZOOM_SMS_SENDER_NUMBER", "+14045550999")
+    monkeypatch.setattr(config, "ZOOM_SMS_SENDER_USER_ID", "zoom-recruiter-1")
     monkeypatch.setattr(config, "ZOOM_SMS_TEST_MODE", True)
     monkeypatch.setattr(config, "ZOOM_SMS_TEST_NUMBERS", ("+1 (404) 555-0123",))
     calls = []
-    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message: (
+    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message, **_kwargs: (
         calls.append((phone, message)) or {
             "message_id": "zoom-test-message", "session_id": "zoom-test-session",
         }
@@ -4689,6 +4727,8 @@ def test_zoom_sms_test_mode_only_bypasses_consent_for_allowlisted_number(monkeyp
 
 def test_zoom_sms_opt_in_request_unlocks_outreach_after_start_reply(monkeypatch):
     store.reset()
+    monkeypatch.setattr(config, "HEALTHBOARD_BASE_URL", "")
+    monkeypatch.setattr(healthboard_auth, "report_message_event", lambda **_kwargs: True)
     candidate_id = store.add_candidate("Morgan Clinician", "Seattle, WA", source="medifind")
     quick_sourcer_client.apply_to_candidate(candidate_id, {
         "status": "found", "name": "Morgan Clinician", "source": "test fixture",
@@ -4697,11 +4737,12 @@ def test_zoom_sms_opt_in_request_unlocks_outreach_after_start_reply(monkeypatch)
     })
     monkeypatch.setattr(config, "ZOOM_SMS_ENABLED", True)
     monkeypatch.setattr(config, "ZOOM_SMS_SENDER_NUMBER", "+12065550999")
+    monkeypatch.setattr(config, "ZOOM_SMS_SENDER_USER_ID", "zoom-recruiter-1")
     monkeypatch.setattr(config, "ZOOM_SMS_TEST_MODE", False)
     monkeypatch.setattr(config, "ZOOM_SMS_TEST_NUMBERS", ())
     monkeypatch.setattr(config, "ZOOM_WEBHOOK_SECRET_TOKEN", "webhook-secret")
     sent_messages = []
-    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message: (
+    monkeypatch.setattr(zoom_sms, "send_sms", lambda phone, message, **_kwargs: (
         sent_messages.append((phone, message)) or {
             "message_id": f"zoom-{len(sent_messages)}", "session_id": "zoom-opt-in-session",
         }

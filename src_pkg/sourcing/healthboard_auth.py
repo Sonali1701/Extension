@@ -118,6 +118,38 @@ def report_enrichment_service(*, user_id: str, event_id: str, candidate_id: int,
     return True
 
 
+def medhunt_enrichment_credits(token: str) -> dict:
+    response = httpx.get(
+        _url("/api/extension/medhunt/credits"),
+        headers={"X-Capture-Token": str(token or "").strip()},
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    return dict(response.json())
+
+
+def consume_medhunt_enrichment_credits(token: str, *, candidate_ids: list[int],
+                                       run_id: str = "") -> dict:
+    response = httpx.post(
+        _url("/api/extension/medhunt/credits/consume"),
+        headers={"X-Capture-Token": str(token or "").strip()},
+        json={"candidate_ids": candidate_ids, "run_id": run_id},
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    return dict(response.json())
+
+
+def medhunt_sms_sender(token: str) -> dict:
+    response = httpx.get(
+        _url("/api/extension/medhunt/sms-sender"),
+        headers={"X-Capture-Token": str(token or "").strip()},
+        timeout=config.HEALTHBOARD_AUTH_TIMEOUT,
+    )
+    response.raise_for_status()
+    return dict(response.json())
+
+
 def list_recruiters(token: str) -> list[dict]:
     response = httpx.get(
         _url("/api/extension/team/recruiters"),
@@ -147,7 +179,7 @@ def assign_conversation(token: str, *, conversation: dict, recruiter_user_id: st
 
 
 def report_message_event(*, event_id: str, conversation: dict, event_type: str,
-                         message_preview: str = "") -> bool:
+                         message_preview: str = "", sender_user_id: str = "") -> bool:
     """Report asynchronous Zoom activity without exposing a user's session."""
     token = config.MEDHUNT_HEALTHBOARD_SERVICE_TOKEN
     if not enabled() or not token:
@@ -163,6 +195,7 @@ def report_message_event(*, event_id: str, conversation: dict, event_type: str,
             "candidate_name": str(conversation.get("candidate_name") or ""),
             "initiated_by_user_id": str(conversation.get("initiated_by") or ""),
             "assigned_recruiter_user_id": str(conversation.get("assigned_recruiter_id") or ""),
+            "sender_user_id": str(sender_user_id or ""),
             "event_type": str(event_type),
             "message_preview": str(message_preview or "")[:240],
         },

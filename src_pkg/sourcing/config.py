@@ -119,9 +119,10 @@ MEDHUNT_DEVICE_IDLE_DAYS = max(
     7, min(365, int(os.getenv("MEDHUNT_DEVICE_IDLE_DAYS", "90")))
 )
 
-# Zoom Phone SMS is a server-side integration. Credentials are never shipped
-# in the browser extension. Sending remains disabled until every required
-# value is present and the operator explicitly enables it.
+# Zoom Phone OAuth credentials stay server-side. Production sender numbers and
+# Zoom user IDs are resolved per recruiter from Halo; the environment sender
+# below is retained only for standalone/local development. Credentials are
+# never shipped in the browser extension.
 ZOOM_SMS_ENABLED_REQUESTED = os.getenv("ZOOM_SMS_ENABLED", "0").strip().lower() in (
     "1", "true", "yes",
 )
@@ -136,7 +137,7 @@ ZOOM_OAUTH_URL = os.getenv("ZOOM_OAUTH_URL", "https://zoom.us/oauth/token").stri
 ZOOM_SMS_TIMEOUT = max(3.0, min(60.0, float(os.getenv("ZOOM_SMS_TIMEOUT", "20"))))
 ZOOM_SMS_ENABLED = bool(
     ZOOM_SMS_ENABLED_REQUESTED and ZOOM_ACCOUNT_ID and ZOOM_CLIENT_ID
-    and ZOOM_CLIENT_SECRET and ZOOM_SMS_SENDER_USER_ID and ZOOM_SMS_SENDER_NUMBER
+    and ZOOM_CLIENT_SECRET
 )
 # Development-only consent bypass. It is deliberately restricted to an
 # explicit phone-number allowlist so this cannot become an unrestricted
