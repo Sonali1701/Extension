@@ -74,7 +74,7 @@ def main():
         npino.add_script_tag(path=str(FRONTEND / "healthcare-directory-content.js"))
         npino_result = _message(npino, {"type": "RADIXSOL_LIST_PLATFORM_CANDIDATES"})
         assert npino_result["platform"] == "npino", npino_result
-        assert npino_result["adapter_revision"] == "healthcare-directory-v12"
+        assert npino_result["adapter_revision"] == "healthcare-directory-v13"
         assert npino_result["count"] == 1, npino_result
         assert npino_result["profiles"][0]["name"] == "Patrick Theodore Gomella"
         assert npino_result["profiles"][0]["source_id"] == "1093058315"
@@ -88,6 +88,13 @@ def main():
         nurses.add_script_tag(path=str(FRONTEND / "healthcare-directory-content.js"))
         nurse_result = _message(nurses, {"type": "RADIXSOL_LIST_PLATFORM_CANDIDATES"})
         assert nurse_result["count"] == 20, nurse_result
+        nurses.add_script_tag(path=str(FRONTEND / "profile-quality.js"))
+        nurse_quality = nurses.evaluate(
+            "profiles => globalThis.RadixsolProfileQuality.sanitizeProfiles(profiles, "
+            "{platform: 'npino'}).profiles.length",
+            nurse_result["profiles"],
+        )
+        assert nurse_quality == 20, nurse_result
         assert nurse_result["profiles"][0]["source_url"].startswith("https://npino.com/nurse/1003000985-")
         assert nurse_result["profiles"][0]["source_id"] == "1003000985"
         assert nurse_result["profiles"][0]["location"] == "Sacramento, CA"
@@ -294,7 +301,7 @@ def main():
         medifind_result = _message(medifind, {"type": "RADIXSOL_SCAN_PLATFORM_CANDIDATES"})
         assert medifind_result["platform"] == "medifind", medifind_result
         assert medifind_result["platform_label"] == "MediFind"
-        assert medifind_result["adapter_revision"] == "healthcare-directory-v12"
+        assert medifind_result["adapter_revision"] == "healthcare-directory-v13"
         assert medifind_result["count"] == 1, medifind_result
         medifind_profile = medifind_result["profiles"][0]
         assert medifind_profile["name"] == "Brian E. Louie"
@@ -363,7 +370,7 @@ def main():
         commonspirit_result = _message(commonspirit, {"type": "RADIXSOL_SCAN_PLATFORM_CANDIDATES"})
         assert commonspirit_result["platform"] == "commonspirit", commonspirit_result
         assert commonspirit_result["platform_label"] == "CommonSpirit Health"
-        assert commonspirit_result["adapter_revision"] == "healthcare-directory-v12"
+        assert commonspirit_result["adapter_revision"] == "healthcare-directory-v13"
         assert commonspirit_result["count"] == 2, commonspirit_result
         commonspirit_profile = next(
             profile for profile in commonspirit_result["profiles"]
@@ -504,7 +511,7 @@ def main():
         sharecare_result = _message(sharecare, {"type": "RADIXSOL_LIST_PLATFORM_CANDIDATES"})
         assert sharecare_result["platform"] == "sharecare", sharecare_result
         assert sharecare_result["platform_label"] == "Sharecare"
-        assert sharecare_result["adapter_revision"] == "healthcare-directory-v12"
+        assert sharecare_result["adapter_revision"] == "healthcare-directory-v13"
         assert sharecare_result["count"] == 1, sharecare_result
         sharecare_candidate = sharecare_result["profiles"][0]
         assert sharecare_candidate["name"] == "Raja Flores"
@@ -530,7 +537,7 @@ def main():
         _install_runtime(sharecare_profile)
         sharecare_profile.add_script_tag(path=str(FRONTEND / "healthcare-directory-content.js"))
         sharecare_capture = _message(sharecare_profile, {
-            "type": "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST",
+            "type": "RADIXSOL_HEALTHCARE_DIRECTORY_V13_REQUEST",
             "original_type": "RADIXSOL_CAPTURE_PLATFORM_PROFILE",
         })
         assert sharecare_capture["ok"] is True, sharecare_capture

@@ -275,6 +275,8 @@ def _run_browser(browser_type, executable: Path) -> dict:
     assert page.locator(".source-brand-copy strong").inner_text() == "Medhunt"
     assert page.locator(".medhunt-mark").count() == 1
     assert page.locator(".radixsol-mark").count() == 0
+    logout = page.locator("#sourceLogoutButton")
+    assert logout.is_visible(), "Signed-in extension users need a visible logout action."
     assert page.locator(".medhunt-mark").evaluate("el => getComputedStyle(el).borderRadius") != "50%"
     _assert_inactive_header_progress(page)
 
@@ -401,6 +403,9 @@ def _run_browser(browser_type, executable: Path) -> dict:
     assert page.locator(".capture-row").count() == 50
     assert "Ready" in page.locator(".result-summary").inner_text()
     assert "Retry" in page.locator(".result-summary").inner_text()
+    assert page.locator("#sourceCreditBalance").is_visible()
+    assert "credits" in page.locator("#sourceCreditBalance").inner_text().casefold()
+    assert page.locator("#sourceAccountButton").count() == 0
 
     matched_tab = page.locator('[role=tab][data-filter="matched"]')
     matched_tab.click()
@@ -434,6 +439,17 @@ def _run_browser(browser_type, executable: Path) -> dict:
     )
     forbidden = {"rgb(116, 50, 237)", "rgb(126, 52, 238)", "rgb(128, 53, 241)"}
     assert forbidden.isdisjoint(rendered_colors), rendered_colors
+
+    page.evaluate("""() => {
+      chrome.storage.local.remove = (keys, callback) => {
+        for (const key of keys || []) delete window.__panelTest.local[key];
+        queueMicrotask(() => callback?.());
+      };
+    }""")
+    logout.click()
+    page.wait_for_function("document.querySelector('#sourceLogoutButton')?.hidden === true")
+    assert "Signed out" in page.locator("#toast").inner_text()
+    assert page.locator("#sourceAccountButton").count() == 0
 
     browser.close()
     return {

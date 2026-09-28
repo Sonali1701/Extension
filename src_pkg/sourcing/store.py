@@ -86,6 +86,10 @@ CREATE TABLE IF NOT EXISTS sms_messages(
 CREATE TABLE IF NOT EXISTS sms_webhook_events(
   event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL, created REAL,
   processed INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS sms_outreach_claims(
+  candidate_id INTEGER PRIMARY KEY, phone_key TEXT NOT NULL UNIQUE,
+  request_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'sending',
+  message_id INTEGER, created REAL NOT NULL, updated REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS sms_phone_controls(
   phone_key TEXT PRIMARY KEY, candidate_id INTEGER NOT NULL,
   conversation_id INTEGER, state TEXT NOT NULL, request_id TEXT DEFAULT '',
@@ -352,6 +356,12 @@ _POSTGRES_SCHEMA = (
          event_key TEXT PRIMARY KEY, event_type TEXT NOT NULL,
          created DOUBLE PRECISION, processed INTEGER DEFAULT 0
        )""",
+    """CREATE TABLE IF NOT EXISTS sms_outreach_claims(
+         candidate_id BIGINT PRIMARY KEY, phone_key TEXT NOT NULL UNIQUE,
+         request_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL DEFAULT 'sending',
+         message_id BIGINT, created DOUBLE PRECISION NOT NULL,
+         updated DOUBLE PRECISION NOT NULL
+       )""",
     """CREATE TABLE IF NOT EXISTS sms_phone_controls(
          phone_key TEXT PRIMARY KEY, candidate_id BIGINT NOT NULL,
          conversation_id BIGINT, state TEXT NOT NULL,
@@ -463,7 +473,7 @@ _POSTGRES_REQUIRED_TABLES = (
     "nexus_candidate_links", "resume_capture_locks", "nexus_deliveries",
     "watcher_email_deliveries",
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
-    "sms_phone_controls",
+    "sms_outreach_claims", "sms_phone_controls",
 )
 _POSTGRES_REQUIRED_COLUMNS = {
     "enrichment_events": ("candidate_id", "halo_status", "platform"),
@@ -2685,7 +2695,7 @@ def record_sms_consent(candidate_id, phone, status, source, evidence,
                    ON CONFLICT(phone_key) DO UPDATE SET state='opted_out',updated=excluded.updated""",
                 (key, int(candidate_id), now, now),
             )
-        elif source_value == "inbound_sms" and str(captured_by or "") == "zoom":
+        elif source_value == "inbound_sms" and str(captured_by or "") in {"zoom", "twilio"}:
             # Only an authenticated inbound carrier event may reverse a prior
             # SMS suppression. Manually entered records never clear DNC.
             connection.execute("DELETE FROM dnc WHERE value=?", (key,))
@@ -3043,6 +3053,64 @@ def complete_sms_webhook(event_key):
             "UPDATE sms_webhook_events SET processed=1 WHERE event_key=?",
             (str(event_key),),
         )
+
+
+def claim_sms_outreach(candidate_id, phone, request_id):
+    """Atomically reserve the one initial recruiting SMS allowed per candidate/phone."""
+    now = time.time()
+    key = contact_key(phone)
+    with _conn() as connection:
+        inserted = connection.execute(
+            """INSERT INTO sms_outreach_claims(
+                 candidate_id,phone_key,request_id,status,created,updated
+               ) VALUES(?,?,?,'sending',?,?) ON CONFLICT DO NOTHING""",
+            (int(candidate_id), key, str(request_id), now, now),
+        )
+        row = connection.execute(
+            """SELECT * FROM sms_outreach_claims
+               WHERE candidate_id=? OR phone_key=? ORDER BY created LIMIT 1""",
+            (int(candidate_id), key),
+        ).fetchone()
+        return {"created": inserted.rowcount == 1, "claim": dict(row) if row else None}
+
+
+def update_sms_outreach_claim(candidate_id, *, status, message_id=None):
+    # Update one claimed outreach after the provider accepts or rejects it.
+    with _conn() as connection:
+        connection.execute(
+            """UPDATE sms_outreach_claims SET status=?,message_id=COALESCE(?,message_id),
+               updated=? WHERE candidate_id=?""",
+            (str(status), message_id, time.time(), int(candidate_id)),
+        )
+        row = connection.execute(
+            "SELECT * FROM sms_outreach_claims WHERE candidate_id=?",
+            (int(candidate_id),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def get_sms_outreach_claim(candidate_id, phone):
+    key = contact_key(phone)
+    with _conn() as connection:
+        row = connection.execute(
+            'SELECT * FROM sms_outreach_claims WHERE candidate_id=? OR phone_key=? ORDER BY created LIMIT 1',
+            (int(candidate_id), key),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def sms_candidate_contacted(candidate_id, phone) -> bool:
+    key = contact_key(phone)
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT 1 FROM sms_messages m "
+            "JOIN sms_conversations c ON c.id=m.conversation_id "
+            "WHERE m.direction='outbound' "
+            "AND m.status IN ('accepted','sent','delivered') "
+            "AND (c.candidate_id=? OR c.phone_key=?) LIMIT 1",
+            (int(candidate_id), key),
+        ).fetchone()
+        return bool(row)
 
 
 def find_sms_conversation(*, session_id="", phone=""):

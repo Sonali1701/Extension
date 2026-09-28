@@ -567,3 +567,17 @@ def lookup_candidate(candidate_id: int, refresh: bool = False) -> dict:
         refresh=refresh,
     )
     return apply_to_candidate(candidate_id, result)
+
+
+def needs_provider_lookup(candidate_id: int) -> bool:
+    """Whether this contact lookup is expected to make a fresh provider call."""
+    if not configured():
+        return False
+    candidate = store.get_candidate(candidate_id)
+    if not candidate or _stored_candidate_result(candidate):
+        return False
+    name = person_name.normalize_person_name(candidate.get("name") or "") or str(
+        candidate.get("name") or ""
+    )
+    key = _request_key(name, str(candidate.get("location") or ""))
+    return _cached(key) is None

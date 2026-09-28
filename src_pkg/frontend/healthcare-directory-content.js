@@ -1,8 +1,8 @@
 (() => {
   "use strict";
 
-  const ADAPTER_REVISION = "healthcare-directory-v12";
-  const ADAPTER_REQUEST = "RADIXSOL_HEALTHCARE_DIRECTORY_V12_REQUEST";
+  const ADAPTER_REVISION = "healthcare-directory-v13";
+  const ADAPTER_REQUEST = "RADIXSOL_HEALTHCARE_DIRECTORY_V13_REQUEST";
   if (window.__radixsolHealthcareDirectoryAdapterRevision === ADAPTER_REVISION) return;
   window.__radixsolHealthcareDirectoryAdapterRevision = ADAPTER_REVISION;
 
@@ -72,7 +72,11 @@
     }
   }
 
-  const PROVIDER_CREDENTIAL = /^(?:M\.?D\.?|D\.?O\.?|M\.?P\.?H\.?|Ph\.?D\.?|DNP|APRN(?:-C)?|NP|FNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|AGNP(?:-(?:C|BC))?|CRNP|CNP|CNM|CRNA|PA-C|R\.?\s*N\.?|LPN|MSN|B\.?\s*S\.?\s*N\.?|BSNRN|LCCE|REGISTERED NURSE|DDS|DMD|FACP|FACOG)\.?$/i;
+  // NPINO appends many valid nursing credentials to the provider link text.
+  // Keep them out of the candidate name so the card is still recognized as
+  // an individual provider (for example "Jane Doe, AGACNP-BC" or
+  // "Jane Doe, C.P.N.P.").
+  const PROVIDER_CREDENTIAL = /^(?:M\.?D\.?|D\.?O\.?|M\.?P\.?H\.?|Ph\.?D\.?|DNP|APRN(?:-(?:C|BC|CNP))?|APN|ANP|NP(?:-(?:C|BC))?|FNP(?:-(?:C|BC))?|PNP(?:-(?:AC|PC|C|BC))?|C\.?P\.?N\.?P(?:-(?:AC|PC|C|BC))?|ACNP(?:-BC)?|AGNP(?:-(?:C|BC))?|AGACNP(?:-BC)?|AGPCNP(?:-(?:C|BC))?|WHNP(?:-(?:C|BC))?|NNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|CRNP|CNP|CNM|CRNA|CNS|CCRN|PA-C|R\.?\s*N\.?(?:-BC)?|LPN|LVN|MSN|B\.?\s*S\.?\s*N\.?|BSNRN|LCCE|REGISTERED NURSE|NURSE PRACTITIONER|DDS|DMD|FACP|FACOG)\.?$/i;
 
   function providerCredentials(value) {
     const parts = clean(value, 240)
@@ -86,12 +90,12 @@
     const values = unique(credentials).join(" ");
     if (/\b(?:M\.?D\.?|D\.?O\.?)\b/i.test(values)) return "Physician";
     if (/\bCRNA\b/i.test(values)) return "Nurse Anesthetist";
-    if (/\b(?:DNP|APRN(?:-C)?|NP|FNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|AGNP(?:-(?:C|BC))?|CRNP|CNP|CNM)\b/i.test(values)) {
+    if (/\b(?:DNP|APRN(?:-(?:C|BC|CNP))?|NP(?:-(?:C|BC))?|FNP(?:-(?:C|BC))?|ACNP(?:-BC)?|AGACNP(?:-BC)?|AGPCNP(?:-(?:C|BC))?|PNP(?:-(?:AC|PC|C|BC))?|CPNP(?:-(?:AC|PC|C|BC))?|WHNP(?:-(?:C|BC))?|NNP(?:-(?:C|BC))?|PMHNP(?:-(?:C|BC))?|AGNP(?:-(?:C|BC))?|CRNP|CNP|CNM)\b/i.test(values)) {
       return "Nurse Practitioner";
     }
     if (/\bPA-C\b/i.test(values)) return "Physician Assistant";
     if (/\b(?:DDS|DMD)\b/i.test(values)) return "Dentist";
-    if (/\b(?:RN|LPN)\b/i.test(values)) return "Nurse";
+    if (/\b(?:RN(?:-BC)?|LPN|LVN|CNS|CCRN)\b/i.test(values)) return "Nurse";
     return "Healthcare Provider";
   }
 

@@ -109,9 +109,6 @@ QUICK_SOURCER_ENABLED=1
 CONTACT_LOOKUP_PROVIDER=quick_sourcer
 VERIFY_EMAILS=0
 NEVERBOUNCE_API_KEY=<optional>
-VERIFY_PHONES=0
-TWILIO_ACCOUNT_SID=<optional>
-TWILIO_AUTH_TOKEN=<optional>
 ```
 
 When `DATABASE_BACKEND=sqlite`, the application ignores `DATABASE_URL` even if
@@ -348,12 +345,10 @@ Contact lookup and verification are different operations:
    before persistence.
 5. The verified record stores its canonical name, provider person ID, evidence,
    verification timestamps, contact expiry, and cross-platform master link.
-6. A provider identity match is not the same as email deliverability, active
-   phone-line status, or phone ownership. Set `VERIFY_EMAILS=1` with a
-   NeverBounce key for deliverability results. Set `VERIFY_PHONES=1` with
-   Twilio credentials for basic number-range validation. Basic Twilio Lookup
-   still does not prove ownership; ownership requires a separately enabled
-   Identity Match product and appropriate legal basis.
+6. A provider identity match is not the same as email deliverability or phone
+   ownership. Set `VERIFY_EMAILS=1` with a NeverBounce key for deliverability
+   results. Medhunt performs phone-format checks locally and does not use a
+   third-party phone lookup service.
 
 ### Cost-aware PDL → Enformion waterfall
 
@@ -400,7 +395,6 @@ Enformion Person Search is fallback-only. The request order is:
    phone**. Enformion alternatives must be connected, not explicitly stale,
    and cannot be fax, pager, disconnected, inactive, or invalid. PDL associated
    numbers do not carry a connected guarantee and are never labeled as mobile.
-   SMS drafting remains restricted to mobile/wireless values.
 7. Caches normalized Enformion results for 90 days by default. Cached fallbacks
    are evaluated before the consent and budget gates, so they remain usable at
    zero provider cost even after the fresh-call cap is reached. Provider values
@@ -623,6 +617,18 @@ revocation, expiry, and registration events are retained in
 `extension_device_events`. Older extension builds that do not send an
 installation identifier must be updated before this backend is deployed.
 
+### Extension enrichment credits
+
+Each Healthcareboard user receives 100 Medhunt extension enrichment credits on
+their first credit-balance request. One credit is charged per candidate when a
+lookup will make a fresh Quick Sourcer provider request; stored or cached contact
+results are free. The charge is per user and candidate, so retrying or reopening
+the same candidate does not charge it again. A depleted balance blocks new
+provider requests until topped up. Organization owners, admins, and managers can
+review and grant these credits under Halo's Organization → Members & roles page.
+These extension credits are separate from Halo contact-reveal credits. Deploy the
+Halo changes before this extension/backend update so the credit routes exist.
+
 ```text
 MEDHUNT_EXTENSION_ORIGINS=chrome-extension://<32-character-extension-id>
 MEDHUNT_ALLOW_UNLISTED_EXTENSION_ORIGINS=0
@@ -720,14 +726,31 @@ tests/                  Demo-mode backend and extension checks
 `POST /outreach/{id}/approve` · `PATCH /candidates/{id}/stage` ·
 `POST /dnc` · `GET /stats` · `GET /health` ·
 `GET /quick-sourcer/status` · `POST /quick-sourcer/find` ·
-`GET /quick-sourcer/candidates/{external_id}`
+`GET /quick-sourcer/candidates/{external_id}` ·
+`GET /candidates/{id}/sms-preview` · `POST /messaging/sms` ·
+`POST /integrations/twilio/webhook`
+
+## Candidate SMS
+
+Set `SMS_PROVIDER=twilio`, `TWILIO_SMS_ENABLED=1`, the Twilio account
+credentials, `TWILIO_PHONE_NUMBER`, and the exact public `TWILIO_WEBHOOK_URL`.
+Configure that URL as the Twilio number's incoming-message webhook using POST.
+Set `SENDGRID_API_KEY`, `EMAIL_FROM`, and optionally
+`SMS_REPLY_NOTIFICATION_EMAILS` so candidate replies reach the initiating
+recruiter and any administrator fallback recipients.
+
+The extension builds the initial message from the candidate's captured first
+name, specialty, title, city, and state. The backend permits one initial SMS
+per candidate or phone number, honors the do-not-contact list, and records STOP
+replies before sending the recruiter notification email.
 
 ## Compliance defaults
 
 - Use platform integrations only with candidate data you are authorized to
   access and retain.
-- Email-first; phone and SMS require appropriate TCPA consent.
-- Human approval is required before outreach is used.
+- Candidate SMS is sent through the configured Twilio account only after the
+  recruiter reviews the generated message and selects Send.
+- Email outreach remains a human-reviewed draft workflow.
 - Nothing is sent automatically.
 - Do-not-contact entries are enforced during enrichment and outreach.
 - Honor opt-outs and applicable retention/deletion requirements.

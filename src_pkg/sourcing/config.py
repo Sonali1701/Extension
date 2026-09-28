@@ -105,6 +105,10 @@ HEALTHBOARD_AUTH_TIMEOUT = max(
 HEALTHBOARD_AUTH_CACHE_SECONDS = max(
     0, min(300, int(os.getenv("HEALTHBOARD_AUTH_CACHE_SECONDS", "60")))
 )
+# Shared service credential for Halo analytics delivery and internal service routes.
+MEDHUNT_HEALTHBOARD_SERVICE_TOKEN = os.getenv(
+    "MEDHUNT_HEALTHBOARD_SERVICE_TOKEN", ""
+).strip()
 # Retained for deployments that still set this variable; device registration
 # no longer blocks sign-in based on a device count.
 MEDHUNT_MAX_REGISTERED_DEVICES = max(
@@ -119,10 +123,8 @@ MEDHUNT_DEVICE_IDLE_DAYS = max(
     7, min(365, int(os.getenv("MEDHUNT_DEVICE_IDLE_DAYS", "90")))
 )
 
-# Zoom Phone OAuth credentials stay server-side. Production sender numbers and
-# Zoom user IDs are resolved per recruiter from Halo; the environment sender
-# below is retained only for standalone/local development. Credentials are
-# never shipped in the browser extension.
+# Zoom Phone remains configured for compatibility, while SMS_PROVIDER selects
+# Twilio for current outbound delivery.
 ZOOM_SMS_ENABLED_REQUESTED = os.getenv("ZOOM_SMS_ENABLED", "0").strip().lower() in (
     "1", "true", "yes",
 )
@@ -139,9 +141,6 @@ ZOOM_SMS_ENABLED = bool(
     ZOOM_SMS_ENABLED_REQUESTED and ZOOM_ACCOUNT_ID and ZOOM_CLIENT_ID
     and ZOOM_CLIENT_SECRET
 )
-# Development-only consent bypass. It is deliberately restricted to an
-# explicit phone-number allowlist so this cannot become an unrestricted
-# production outreach switch.
 ZOOM_SMS_TEST_MODE = os.getenv("ZOOM_SMS_TEST_MODE", "0").strip().lower() in (
     "1", "true", "yes",
 )
@@ -150,13 +149,6 @@ ZOOM_SMS_TEST_NUMBERS = tuple(dict.fromkeys(
     for value in os.getenv("ZOOM_SMS_TEST_NUMBERS", "").split(",")
     if value.strip()
 ))
-
-# Shared server-to-server credential used only for Medhunt webhook activity
-# reporting. User-initiated HealthBoard calls continue to use the user's opaque
-# extension token.
-MEDHUNT_HEALTHBOARD_SERVICE_TOKEN = os.getenv(
-    "MEDHUNT_HEALTHBOARD_SERVICE_TOKEN", ""
-).strip()
 
 # Hosted browser clients must be explicitly allowlisted once Chrome assigns
 # the production extension ID. Local development keeps the broad extension
@@ -362,11 +354,25 @@ NPI_TIMEOUT = max(3.0, float(os.getenv("NPI_TIMEOUT", "12")))
 VERIFY_EMAILS = os.getenv("VERIFY_EMAILS", "").strip().lower() in ("1", "true", "yes")
 NEVERBOUNCE_API_KEY = os.getenv("NEVERBOUNCE_API_KEY", "")
 VERIFY_PHONES = os.getenv("VERIFY_PHONES", "").strip().lower() in ("1", "true", "yes")
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
-TWILIO_API_KEY = os.getenv("TWILIO_API_KEY", "")
-TWILIO_API_KEY_SECRET = os.getenv("TWILIO_API_KEY_SECRET", "")
-DEFAULT_PHONE_COUNTRY = os.getenv("DEFAULT_PHONE_COUNTRY", "US")
+# ---- Candidate SMS (Twilio) ----
+SMS_PROVIDER = os.getenv("SMS_PROVIDER", "twilio").strip().casefold() or "twilio"
+TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+TWILIO_API_KEY = os.getenv("TWILIO_API_KEY", "").strip()
+TWILIO_API_KEY_SECRET = os.getenv("TWILIO_API_KEY_SECRET", "").strip()
+TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
+TWILIO_WEBHOOK_URL = os.getenv("TWILIO_WEBHOOK_URL", "").strip()
+TWILIO_SMS_TIMEOUT = max(3.0, min(60.0, float(os.getenv("TWILIO_SMS_TIMEOUT", "20"))))
+TWILIO_SMS_ENABLED = bool(
+    os.getenv("TWILIO_SMS_ENABLED", "0").strip().lower() in ("1", "true", "yes")
+    and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_PHONE_NUMBER
+)
+DEFAULT_PHONE_COUNTRY = os.getenv("DEFAULT_PHONE_COUNTRY", "US").strip() or "US"
+SMS_REPLY_NOTIFICATION_EMAILS = tuple(dict.fromkeys(
+    email.strip().casefold()
+    for email in re.split(r"[,;]", os.getenv("SMS_REPLY_NOTIFICATION_EMAILS", ""))
+    if email.strip()
+))
 
 # ---- Watcher email notifications (SendGrid) ----
 # Recipients are administrator-controlled and never supplied by the browser.
@@ -540,7 +546,7 @@ else:
 NEXUS_SYNC_ENABLED = bool(NEXUS_SYNC_REQUESTED and not NEXUS_DISABLED_REASON)
 
 # ---- Compliance defaults (baked into the workflow) ----
-# Default outreach channel; phone/SMS require extra consent (TCPA), so email-first.
+# Default outreach channel; Medhunt only drafts email outreach.
 DEFAULT_CHANNEL = "email"
 REQUIRE_HUMAN_APPROVAL = True   # nothing sends automatically
 HONOR_DNC = True                # do-not-contact / opt-out list is always enforced
@@ -548,7 +554,6 @@ HONOR_DNC = True                # do-not-contact / opt-out list is always enforc
 COMPLIANCE_NOTICE = (
     "Contact data may come from licensed enrichment providers. Use for legitimate "
     "recruiting outreach only. Email sends must comply with CAN-SPAM (identify sender, "
-    "honor opt-outs); phone/SMS outreach is subject to TCPA consent rules. This tool "
-    "defaults to email, requires human approval before sending, and enforces a "
+    "honor opt-outs). This tool requires human approval before sending and enforces a "
     "do-not-contact list."
 )
