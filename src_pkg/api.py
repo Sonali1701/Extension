@@ -373,6 +373,7 @@ class OutreachBatchIn(BaseModel):
 class SmsSendIn(BaseModel):
     candidate_id: int
     phone: str = Field(min_length=7, max_length=50)
+    message: str = Field(min_length=1, max_length=1600)
     request_id: str = Field(default='', max_length=100)
     provider: str = Field(default='twilio', pattern=r'^(twilio|zoom)$')
 
@@ -1619,38 +1620,6 @@ def _candidate_sms_phone(candidate: dict, supplied: str) -> str:
         raise HTTPException(400, str(exc)) from exc
 
 
-def _candidate_sms_message(candidate: dict) -> dict:
-    notes = str(candidate.get('notes') or '')
-
-    def note_value(label: str) -> str:
-        match = re.search(
-            rf'(?im)^\s*{re.escape(label)}\s*:\s*([^\r\n]+)', notes,
-        )
-        return ' '.join(match.group(1).split()) if match else ''
-
-    name = ' '.join(str(candidate.get('name') or '').split())
-    title = note_value('Role') or note_value('Headline')
-    title = re.split(r'\s+at\s+', title, maxsplit=1, flags=re.IGNORECASE)[0].strip()
-    location = verification.us_city_state(str(candidate.get('location') or ''))
-    city, state = (location.split(',', 1) if location else ('', ''))
-    fields = {
-        'name': name.split()[0].strip('.,;:') if name else '',
-        'title': title,
-        'city': city.strip(),
-        'state': state.strip(),
-    }
-    missing = [key for key, value in fields.items() if not value]
-    message = ''
-    if not missing:
-        message = (
-            f'Hi {fields["name"]}, Brian from Radixsol. We have a '
-            f'{fields["title"]} opening in '
-            f'{fields["city"]}, {fields["state"]}, 13 weeks. Quick Offers, '
-            'Would you be interested in more details?'
-        )
-    return {'message': message, 'fields': fields, 'missing_fields': missing}
-
-
 @app.get('/messaging/status')
 def messaging_status(request: Request):
     user = _request_user(request)
@@ -1685,12 +1654,8 @@ def sms_preview(candidate_id: int, phone: str, request: Request):
     if not candidate:
         raise HTTPException(404, 'Candidate not found.')
     verified_phone = _candidate_sms_phone(candidate, phone)
-    rendered = _candidate_sms_message(candidate)
     return {
         'phone': verified_phone,
-        'message': rendered['message'],
-        'fields': rendered['fields'],
-        'missing_fields': rendered['missing_fields'],
         'opted_out': bool(
             store.is_dnc(verified_phone)
             or store.candidate_sms_opted_out(candidate_id)
@@ -1713,14 +1678,11 @@ def send_sms(body: SmsSendIn, request: Request):
     if not candidate:
         raise HTTPException(404, 'Candidate not found.')
     phone = _candidate_sms_phone(candidate, body.phone)
+    message_text = body.message.strip()
+    if not message_text:
+        raise HTTPException(400, 'Write a message before sending.')
     if store.is_dnc(phone) or store.candidate_sms_opted_out(body.candidate_id):
         raise HTTPException(409, 'This candidate opted out and cannot be messaged.')
-    rendered = _candidate_sms_message(candidate)
-    if rendered['missing_fields']:
-        raise HTTPException(
-            409, 'Candidate SMS data is incomplete: '
-            + ', '.join(rendered['missing_fields']) + '.',
-        )
     if store.sms_candidate_contacted(body.candidate_id, phone):
         raise HTTPException(409, 'This candidate has already been sent SMS outreach.')
     request_id = body.request_id.strip() or uuid.uuid4().hex
@@ -1741,7 +1703,7 @@ def send_sms(body: SmsSendIn, request: Request):
         sender_number=sender_number, sender_user_id=sender_provider_id,
     )
     message, created = store.create_sms_message(
-        conversation['id'], 'outbound', rendered['message'], request_id=request_id,
+        conversation['id'], 'outbound', message_text, request_id=request_id,
         sender_user_id=str(user.get('sub') or ''),
         sender_name=str(user.get('email') or ''),
         sender_number=sender_number, zoom_user_id=sender_provider_id,
@@ -1749,7 +1711,7 @@ def send_sms(body: SmsSendIn, request: Request):
     if not created:
         raise HTTPException(409, 'This candidate has already been sent SMS outreach.')
     try:
-        result = provider_client.send_sms(phone, rendered['message'])
+        result = provider_client.send_sms(phone, message_text)
         sid = str(result.get('sid') or result.get('message_id') or result.get('id') or '')
         message = store.update_sms_message(
             message['id'], status='accepted', zoom_message_id=sid,

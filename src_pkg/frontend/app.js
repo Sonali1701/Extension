@@ -4123,12 +4123,10 @@ async function showSmsComposer(candidateId, candidateName, phone) {
   );
   const defaultProvider = availableProviders[0] || "twilio";
   activeSmsContext.provider = defaultProvider;
-  const missing = Array.isArray(preview.missing_fields) ? preview.missing_fields : [];
   const blocked = availableProviders.length === 0 || preview.opted_out ||
-    preview.already_contacted || missing.length > 0 || !preview.message;
+    preview.already_contacted;
   const notices = [];
   if (!availableProviders.length) notices.push("No SMS provider is configured on the backend.");
-  if (missing.length) notices.push(`Candidate data is incomplete: ${missing.join(", ")}.`);
   if (preview.opted_out) notices.push("This candidate opted out of SMS.");
   if (preview.already_contacted) notices.push("This candidate has already received SMS outreach.");
   if (!status.reply_notifications_configured) notices.push("Reply email notifications are not fully configured.");
@@ -4143,8 +4141,8 @@ async function showSmsComposer(candidateId, candidateName, phone) {
           : `<option value="">Unavailable</option>`}
       </select>
       <label class="field-label mt" for="smsMessage">Message</label>
-      <textarea id="smsMessage" rows="7" readonly>${escapeHtml(preview.message || "Message unavailable until all candidate fields are present.")}</textarea>
-      <p class="muted small">The message uses the candidate's name, title, city, and state.</p>
+      <textarea id="smsMessage" rows="7" maxlength="1600" placeholder="Write a message for this candidate"></textarea>
+      <p class="muted small">Write the message you want to send. Maximum 1,600 characters.</p>
       ${notices.map((item) => `<div class="notice mt">${escapeHtml(item)}</div>`).join("")}
       <div class="row modal-actions">
         <button type="button" class="btn ghost" data-action="close-modal">Cancel</button>
@@ -4170,6 +4168,9 @@ async function composeSmsFromButton(button) {
 
 async function sendCandidateSms() {
   if (!activeSmsContext) throw new Error("Candidate message context expired.");
+  const message = $("#smsMessage")?.value?.trim() || "";
+  if (!message) throw new Error("Write a message before sending.");
+  if (message.length > 1600) throw new Error("SMS messages can contain up to 1,600 characters.");
   const provider = activeSmsContext.provider;
   await api("/messaging/sms", {
     method: "POST",
@@ -4177,6 +4178,7 @@ async function sendCandidateSms() {
     body: JSON.stringify({
       candidate_id: activeSmsContext.candidateId,
       phone: activeSmsContext.phone,
+      message,
       provider: activeSmsContext.provider,
       request_id: crypto.randomUUID(),
     }),
