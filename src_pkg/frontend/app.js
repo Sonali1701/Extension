@@ -4144,7 +4144,7 @@ async function showSmsComposer(candidateId, candidateName, phone) {
       </select>
       <label class="field-label mt" for="smsMessage">Message</label>
       <textarea id="smsMessage" rows="7" readonly>${escapeHtml(preview.message || "Message unavailable until all candidate fields are present.")}</textarea>
-      <p class="muted small">The message uses the candidate's name, specialty, title, city, and state.</p>
+      <p class="muted small">The message uses the candidate's name, title, city, and state.</p>
       ${notices.map((item) => `<div class="notice mt">${escapeHtml(item)}</div>`).join("")}
       <div class="row modal-actions">
         <button type="button" class="btn ghost" data-action="close-modal">Cancel</button>

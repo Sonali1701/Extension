@@ -1635,7 +1635,6 @@ def _candidate_sms_message(candidate: dict) -> dict:
     city, state = (location.split(',', 1) if location else ('', ''))
     fields = {
         'name': name.split()[0].strip('.,;:') if name else '',
-        'specialty': note_value('Specialty'),
         'title': title,
         'city': city.strip(),
         'state': state.strip(),
@@ -1645,7 +1644,7 @@ def _candidate_sms_message(candidate: dict) -> dict:
     if not missing:
         message = (
             f'Hi {fields["name"]}, Brian from Radixsol. We have a '
-            f'{fields["specialty"]} {fields["title"]} opening in '
+            f'{fields["title"]} opening in '
             f'{fields["city"]}, {fields["state"]}, 13 weeks. Quick Offers, '
             'Would you be interested in more details?'
         )
