@@ -4117,11 +4117,17 @@ async function showSmsComposer(candidateId, candidateName, phone) {
     api(`/candidates/${candidateId}/sms-preview?phone=${encodeURIComponent(phone)}`),
   ]);
   activeSmsContext = { candidateId, candidateName, phone: preview.phone };
+  const providers = status.providers || {};
+  const availableProviders = ["twilio", "zoom"].filter((name) =>
+    providers[name]?.enabled && providers[name]?.sender_configured
+  );
+  const defaultProvider = availableProviders[0] || "twilio";
+  activeSmsContext.provider = defaultProvider;
   const missing = Array.isArray(preview.missing_fields) ? preview.missing_fields : [];
-  const blocked = !status.enabled || !status.sender_configured || preview.opted_out ||
+  const blocked = availableProviders.length === 0 || preview.opted_out ||
     preview.already_contacted || missing.length > 0 || !preview.message;
   const notices = [];
-  if (!status.enabled || !status.sender_configured) notices.push("Twilio SMS is not configured on the backend.");
+  if (!availableProviders.length) notices.push("No SMS provider is configured on the backend.");
   if (missing.length) notices.push(`Candidate data is incomplete: ${missing.join(", ")}.`);
   if (preview.opted_out) notices.push("This candidate opted out of SMS.");
   if (preview.already_contacted) notices.push("This candidate has already received SMS outreach.");
@@ -4130,16 +4136,28 @@ async function showSmsComposer(candidateId, candidateName, phone) {
     <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="smsTitle">
       <h3 id="smsTitle">Send SMS to ${escapeHtml(candidateName || "candidate")}</h3>
       <div class="muted small">To: ${escapeHtml(preview.phone || phone)}</div>
+      <label class="field-label mt" for="smsProvider">Send from</label>
+      <select id="smsProvider"${availableProviders.length < 2 ? " disabled" : ""}>
+        ${availableProviders.length
+          ? availableProviders.map((name) => `<option value="${name}">${name === "zoom" ? "Zoom Phone" : "Twilio"}</option>`).join("")
+          : `<option value="">Unavailable</option>`}
+      </select>
       <label class="field-label mt" for="smsMessage">Message</label>
       <textarea id="smsMessage" rows="7" readonly>${escapeHtml(preview.message || "Message unavailable until all candidate fields are present.")}</textarea>
       <p class="muted small">The message uses the candidate's name, specialty, title, city, and state.</p>
       ${notices.map((item) => `<div class="notice mt">${escapeHtml(item)}</div>`).join("")}
       <div class="row modal-actions">
         <button type="button" class="btn ghost" data-action="close-modal">Cancel</button>
-        <button type="button" class="btn teal" data-action="send-sms"${blocked ? " disabled" : ""}>Send with Twilio</button>
+        <button type="button" class="btn teal" data-action="send-sms"${blocked ? " disabled" : ""}>Send with ${defaultProvider === "zoom" ? "Zoom Phone" : "Twilio"}</button>
       </div>
     </section>
   </div>`;
+  const providerSelect = $("#smsProvider");
+  if (providerSelect) providerSelect.onchange = () => {
+    activeSmsContext.provider = providerSelect.value;
+    const sendButton = $('[data-action="send-sms"]');
+    if (sendButton) sendButton.textContent = `Send with ${providerSelect.value === "zoom" ? "Zoom Phone" : "Twilio"}`;
+  };
 }
 
 async function composeSmsFromButton(button) {
@@ -4152,19 +4170,21 @@ async function composeSmsFromButton(button) {
 
 async function sendCandidateSms() {
   if (!activeSmsContext) throw new Error("Candidate message context expired.");
+  const provider = activeSmsContext.provider;
   await api("/messaging/sms", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       candidate_id: activeSmsContext.candidateId,
       phone: activeSmsContext.phone,
+      provider: activeSmsContext.provider,
       request_id: crypto.randomUUID(),
     }),
     timeout: 60000,
   });
   closeModal();
   activeSmsContext = null;
-  notify("Message accepted by Twilio.");
+  notify(`Message accepted by ${provider === "zoom" ? "Zoom Phone" : "Twilio"}.`);
   if (activeView === "candidates") await viewCandidates();
 }
 

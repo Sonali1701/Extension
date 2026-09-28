@@ -151,6 +151,15 @@ CREATE TABLE IF NOT EXISTS nexus_deliveries(
   lease_until REAL DEFAULT 0, nexus_candidate_id TEXT DEFAULT '',
   operation TEXT DEFAULT '', last_error TEXT DEFAULT '',
   created REAL, updated REAL);
+CREATE TABLE IF NOT EXISTS candidate_delivery_routes(
+  candidate_id INTEGER PRIMARY KEY, user_id TEXT NOT NULL,
+  user_email TEXT DEFAULT '', ceipal_enabled INTEGER DEFAULT 0,
+  nexus_enabled INTEGER DEFAULT 0, created REAL NOT NULL, updated REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS ceipal_deliveries(
+  candidate_id INTEGER PRIMARY KEY, status TEXT DEFAULT 'pending',
+  attempts INTEGER DEFAULT 0, next_attempt_at REAL DEFAULT 0,
+  lease_until REAL DEFAULT 0, last_error TEXT DEFAULT '',
+  created REAL NOT NULL, updated REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS watcher_email_deliveries(
   id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL,
   recipient TEXT NOT NULL, status TEXT DEFAULT 'pending',
@@ -318,6 +327,18 @@ _POSTGRES_SCHEMA = (
          last_error TEXT DEFAULT '', created DOUBLE PRECISION,
           updated DOUBLE PRECISION
         )""",
+    """CREATE TABLE IF NOT EXISTS candidate_delivery_routes(
+         candidate_id BIGINT PRIMARY KEY, user_id TEXT NOT NULL,
+         user_email TEXT DEFAULT '', ceipal_enabled INTEGER DEFAULT 0,
+         nexus_enabled INTEGER DEFAULT 0, created DOUBLE PRECISION NOT NULL,
+         updated DOUBLE PRECISION NOT NULL
+       )""",
+    """CREATE TABLE IF NOT EXISTS ceipal_deliveries(
+         candidate_id BIGINT PRIMARY KEY, status TEXT DEFAULT 'pending',
+         attempts INTEGER DEFAULT 0, next_attempt_at DOUBLE PRECISION DEFAULT 0,
+         lease_until DOUBLE PRECISION DEFAULT 0, last_error TEXT DEFAULT '',
+         created DOUBLE PRECISION NOT NULL, updated DOUBLE PRECISION NOT NULL
+       )""",
     """CREATE TABLE IF NOT EXISTS watcher_email_deliveries(
          id BIGSERIAL PRIMARY KEY, event_id TEXT NOT NULL,
          recipient TEXT NOT NULL, status TEXT DEFAULT 'pending',
@@ -471,6 +492,8 @@ _POSTGRES_REQUIRED_TABLES = (
     "campaigns", "campaign_members", "dnc", "resumes", "resume_extractions",
     "provider_lookups", "lookup_runs", "lookup_run_items",
     "nexus_candidate_links", "resume_capture_locks", "nexus_deliveries",
+    "candidate_delivery_routes",
+    "ceipal_deliveries",
     "watcher_email_deliveries",
     "sms_consents", "sms_conversations", "sms_messages", "sms_webhook_events",
     "sms_outreach_claims", "sms_phone_controls",
@@ -908,6 +931,85 @@ def get_candidate_by_provider_person_id(provider_person_id: str, exclude_id: int
     with _conn() as connection:
         row = connection.execute(query, args).fetchone()
     return _row(row) if row else None
+
+
+def set_candidate_delivery_route(candidate_id, user_id, user_email="", *, ceipal=False, nexus=False):
+    now = time.time()
+    with _conn() as connection:
+        connection.execute(
+            """INSERT INTO candidate_delivery_routes(
+                   candidate_id,user_id,user_email,ceipal_enabled,nexus_enabled,created,updated
+               ) VALUES(?,?,?,?,?,?,?)
+               ON CONFLICT(candidate_id) DO UPDATE SET
+                   user_id=excluded.user_id,user_email=excluded.user_email,
+                   ceipal_enabled=excluded.ceipal_enabled,nexus_enabled=excluded.nexus_enabled,
+                   updated=excluded.updated""",
+            (
+                int(candidate_id), str(user_id or ''), str(user_email or ''),
+                int(bool(ceipal)), int(bool(nexus)), now, now,
+            ),
+        )
+    return get_candidate_delivery_route(candidate_id)
+
+
+def get_candidate_delivery_route(candidate_id):
+    with _conn() as connection:
+        row = connection.execute(
+            "SELECT * FROM candidate_delivery_routes WHERE candidate_id=?",
+            (int(candidate_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def enqueue_ceipal_delivery(candidate_id):
+    now = time.time()
+    with _conn() as connection:
+        connection.execute(
+            """INSERT INTO ceipal_deliveries(candidate_id,status,created,updated)
+               VALUES(?,'pending',?,?) ON CONFLICT(candidate_id) DO NOTHING""",
+            (int(candidate_id), now, now),
+        )
+        row = connection.execute(
+            "SELECT * FROM ceipal_deliveries WHERE candidate_id=?", (int(candidate_id),),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def claim_ceipal_delivery(lease_seconds=90):
+    now, lease_until = time.time(), time.time() + max(15, float(lease_seconds))
+    with _conn() as connection:
+        with connection.transaction():
+            suffix = " FOR UPDATE SKIP LOCKED" if connection.postgres else ""
+            row = connection.execute(
+                """SELECT * FROM ceipal_deliveries
+                   WHERE (status IN ('pending','retry') AND next_attempt_at<=?)
+                      OR (status='processing' AND lease_until<=?)
+                   ORDER BY created LIMIT 1""" + suffix,
+                (now, now),
+            ).fetchone()
+            if not row:
+                return None
+            updated = connection.execute(
+                """UPDATE ceipal_deliveries SET status='processing',attempts=attempts+1,
+                   lease_until=?,updated=? WHERE candidate_id=?""",
+                (lease_until, now, int(row["candidate_id"])),
+            )
+            if updated.rowcount != 1:
+                return None
+            claimed = connection.execute(
+                "SELECT * FROM ceipal_deliveries WHERE candidate_id=?",
+                (int(row["candidate_id"]),),
+            ).fetchone()
+    return dict(claimed) if claimed else None
+
+
+def finish_ceipal_delivery(candidate_id, status, *, error="", retry_at=0):
+    with _conn() as connection:
+        connection.execute(
+            """UPDATE ceipal_deliveries SET status=?,next_attempt_at=?,lease_until=0,
+               last_error=?,updated=? WHERE candidate_id=?""",
+            (str(status), float(retry_at or 0), str(error)[:1000], time.time(), int(candidate_id)),
+        )
 
 
 # ---- provider lookup cache / credit accounting ----
