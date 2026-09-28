@@ -744,6 +744,12 @@ name, specialty, title, city, and state. The backend permits one initial SMS
 per candidate or phone number, honors the do-not-contact list, and records STOP
 replies before sending the recruiter notification email.
 
+Quick Sourcer uses the shared endpoint pool by default. Set
+`QUICK_SOURCER_DEDICATED_IP=1` after marking at least one Search Endpoint as
+Dedicated in Hub Settings. Medhunt then adds `dedicated_ip: true` to each new
+`/external/find` request and keeps its dedicated results in a separate cache
+namespace from shared-pool results.
+
 ## Compliance defaults
 
 - Use platform integrations only with candidate data you are authorized to
